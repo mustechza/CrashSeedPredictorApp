@@ -4,7 +4,7 @@ import hmac
 import struct
 import binascii
 
-st.title("Crash Predictor - Seed-Based Calculator")
+st.title("Crash Predictor - Seed-Based Calculator.")
 
 # ========= Provably Fair Algorithm ==========
 def get_hmac_sha256(server_seed, client_seed_nonce):
