@@ -1,139 +1,165 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
-from sklearn.ensemble import GradientBoostingRegressor
 import matplotlib.pyplot as plt
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error
 
-st.set_page_config(page_title="Crash Predictor", layout="centered")
-st.title("🚀 Crash Seed Predictor App")
+# ========== CONFIG ==========
+st.set_page_config(page_title="Crash Predictor", layout="wide")
+MAX_MULTIPLIER = 10.5
+SEED_SERVER = st.secrets.get("server_seed", "")
+SEED_CLIENT = st.secrets.get("client_seed", "")
+SEED_NONCE = st.secrets.get("nonce", 0)
 
-CSV_FILE = "training_data.csv"
+# ========== LOAD DATA ==========
+st.sidebar.header("📁 Load Historical Data")
+uploaded_file = st.sidebar.file_uploader("Upload CSV with 'Multipliers' column", type="csv")
 
-# =====================
-# 📂 Load or create training CSV
-# =====================
-if not os.path.exists(CSV_FILE):
-    df = pd.DataFrame(columns=["mean", "std", "last", "max", "min", "change", "target"])
-    df.to_csv(CSV_FILE, index=False)
+def load_data(file):
+    df = pd.read_csv(file)
+    df.columns = df.columns.str.lower()
+    if 'multipliers' in df.columns:
+        df['multipliers'] = df['multipliers'].str.replace('x', '').astype(float)
+        return df
+    else:
+        st.error("CSV must contain a 'Multipliers' column.")
+        return pd.DataFrame()
 
-def load_training_data():
-    df = pd.read_csv(CSV_FILE)
-    X = df.drop(columns=["target"])
-    y = df["target"]
-    return X, y
+if uploaded_file:
+    data = load_data(uploaded_file)
+else:
+    data = pd.DataFrame()
 
-# =====================
-# 🤖 Train model
-# =====================
+# ========== FEATURE EXTRACTION ==========
+def extract_features(series):
+    if len(series) < 10:
+        return None
+    last10 = series[-10:]
+    return pd.DataFrame([{
+        'mean': np.mean(last10),
+        'std': np.std(last10),
+        'last': last10[-1],
+        'max': max(last10),
+        'min': min(last10),
+        'last_diff': last10[-1] - last10[-2] if len(last10) > 1 else 0
+    }])
+
+# ========== MODEL TRAINING ==========
 def train_model(X, y):
     model = GradientBoostingRegressor()
     model.fit(X, y)
     return model
 
-# =====================
-# 🧠 Feature Extraction
-# =====================
-def extract_features(vals):
-    vals = vals[-10:]
-    return pd.DataFrame([{
-        "mean": np.mean(vals),
-        "std": np.std(vals),
-        "last": vals[-1],
-        "max": max(vals),
-        "min": min(vals),
-        "change": vals[-1] - vals[-2] if len(vals) > 1 else 0
-    }])
+# ========== UI: INPUT ==========
+st.header("🎯 Crash Multiplier Predictor")
 
-# =====================
-# 🧮 Parse Input
-# =====================
-def parse_input(text):
+with st.form("prediction_form"):
+    raw_input = st.text_input("Enter recent multipliers (comma-separated)", "1.52,1.11,1.32,2.58,2.35,3.99,1.19,1.05")
+    feedback = st.text_input("Enter actual next multiplier (optional)", "")
+    submit = st.form_submit_button("Submit")
+
+def parse_input(raw):
     try:
-        return [min(float(x.strip().lower().replace("x", "")), 10.5) for x in text.split(",") if x.strip()]
+        return [min(float(x.strip().lower().replace('x', '')), MAX_MULTIPLIER)
+                for x in raw.split(',') if x.strip()]
     except:
         return []
 
-# =====================
-# 📥 Input Section
-# =====================
-with st.form("prediction_form"):
-    input_data = st.text_input("Enter last 10 crash multipliers (comma-separated)", value="1.2, 1.1, 2.3, 3.1, 1.9, 1.5, 1.0, 2.2, 1.6, 1.4")
-    actual_value = st.text_input("Next actual multiplier (optional, for feedback)")
-    submitted = st.form_submit_button("🔁 Submit & Retrain")
+crash_series = parse_input(raw_input)
+features = extract_features(crash_series) if len(crash_series) >= 10 else None
 
-# =====================
-# 🔮 Prediction
-# =====================
-recent = parse_input(input_data)
-features = extract_features(recent) if len(recent) >= 10 else None
+# Persistent training data
+if 'X_train' not in st.session_state:
+    st.session_state.X_train = pd.DataFrame()
+if 'y_train' not in st.session_state:
+    st.session_state.y_train = pd.Series(dtype=float)
 
-if features is not None:
-    X, y = load_training_data()
-    model = train_model(X, y)
+# Add feedback if provided
+if submit and feedback and features is not None:
+    try:
+        fb_val = min(float(feedback), MAX_MULTIPLIER)
+        st.session_state.X_train = pd.concat([st.session_state.X_train, features], ignore_index=True)
+        st.session_state.y_train = pd.concat([st.session_state.y_train, pd.Series([fb_val])], ignore_index=True)
+        st.success("✅ Model trained with new feedback.")
+    except:
+        st.error("Invalid feedback value.")
 
-    prediction = model.predict(features)[0]
-    safe_target = round(prediction * 0.97, 2)
+# Train if enough data
+model = None
+if len(st.session_state.X_train) >= 10:
+    model = train_model(st.session_state.X_train, st.session_state.y_train)
 
-    st.subheader(f"🎯 Predicted: {prediction:.2f}")
-    st.success(f"🛡️ Safe target (3% edge): {safe_target:.2f}")
+# Predict
+if features is not None and model:
+    pred = model.predict(features)[0]
+    safe = round(pred * 0.97, 2)
+    st.subheader(f"📈 Predicted Next: **{pred:.2f}x**")
+    st.info(f"🛡️ Safe Target (3% edge): **{safe:.2f}x**")
 
-    # Display Indicators
-    st.write("📊 Stats on input:")
-    st.write(f"Mean: {features['mean'].values[0]:.2f}")
-    st.write(f"Std Dev: {features['std'].values[0]:.2f}")
-    st.write(f"Last Change: {features['change'].values[0]:.2f}")
+    # Threshold alerts
+    if pred < 1.2:
+        st.error("⚠️ Danger Zone Prediction!")
+    elif pred > 3.0:
+        st.success("🔥 High Multiplier Expected!")
 
-    # Feedback handling
-    if submitted and actual_value:
-        try:
-            actual = float(actual_value)
-            actual = min(actual, 10.5)
-            new_row = features.copy()
-            new_row["target"] = actual
-            new_row.to_csv(CSV_FILE, mode="a", header=False, index=False)
-            st.success("✅ Model updated with new feedback!")
-        except:
-            st.error("⚠️ Invalid actual value. Enter a valid number.")
+# ========== MONEY MANAGEMENT ==========
+st.header("💰 Strategy Simulator")
 
-# =====================
-# 📈 Accuracy Trend
-# =====================
-df = pd.read_csv(CSV_FILE)
-if len(df) >= 30:
-    last_30 = df.tail(30)
-    X_30 = last_30.drop(columns=["target"])
-    y_30 = last_30["target"]
-    preds = model.predict(X_30)
+col1, col2, col3 = st.columns(3)
+with col1:
+    strategy = st.selectbox("Strategy", ["Flat", "Martingale", "Anti-Martingale"])
+with col2:
+    bankroll = st.number_input("Starting Bankroll", 100, 100000, 1000)
+with col3:
+    base_bet = st.number_input("Base Bet", 1, 100, 10)
 
-    results = pd.DataFrame({
+if len(st.session_state.X_train) >= 10:
+    preds = model.predict(st.session_state.X_train.tail(30))
+    actuals = st.session_state.y_train.tail(30).values
+    outcome = []
+    bal = bankroll
+    bet = base_bet
+
+    for p, a in zip(preds, actuals):
+        win = a >= p * 0.97
+        bal += bet * (p if win else -1)
+        outcome.append((p, a, win, bal))
+        if strategy == "Martingale":
+            bet = bet * 2 if not win else base_bet
+        elif strategy == "Anti-Martingale":
+            bet = bet * 2 if win else base_bet
+        else:
+            bet = base_bet
+
+    sim_df = pd.DataFrame(outcome, columns=["Pred", "Actual", "Win", "Bankroll"])
+    st.dataframe(sim_df.style.applymap(lambda x: 'background-color: #d4edda' if isinstance(x, bool) and x else 'background-color: #f8d7da', subset=["Win"]))
+
+    st.line_chart(sim_df["Bankroll"])
+    winrate = (sim_df["Win"].sum() / len(sim_df)) * 100
+    st.metric("📊 Win Rate", f"{winrate:.2f}%")
+
+# ========== ACCURACY ==========
+st.header("📋 Recent Prediction Accuracy")
+if len(st.session_state.X_train) >= 10:
+    preds = model.predict(st.session_state.X_train.tail(20))
+    actuals = st.session_state.y_train.tail(20).values
+    errors = np.abs(preds - actuals)
+    result_df = pd.DataFrame({
         "Predicted": preds,
-        "Actual": y_30,
-        "Error": np.abs(preds - y_30),
-        "Win/Loss": np.where(preds * 0.97 <= y_30, "✅ Win", "❌ Loss")
+        "Actual": actuals,
+        "Error": errors,
+        "Win": actuals >= preds * 0.97
     })
+    st.dataframe(result_df.style.applymap(lambda x: 'background-color: #d4edda' if isinstance(x, bool) and x else 'background-color: #f8d7da', subset=["Win"]))
+    st.metric("MAE (Last 20)", f"{np.mean(errors):.2f}")
 
-    # Color-coded
-    def highlight_winloss(val):
-        color = "#d4edda" if val == "✅ Win" else "#f8d7da"
-        return f"background-color: {color}"
+# ========== SEED (OPTIONAL) ==========
+with st.expander("🔐 Provably Fair (Seed Debug)"):
+    st.text(f"Server Seed: {SEED_SERVER}")
+    st.text(f"Client Seed: {SEED_CLIENT}")
+    st.text(f"Nonce: {SEED_NONCE}")
+    st.warning("Seed-based validation not active yet. Coming soon.")
 
-    st.subheader("📊 Prediction Results (Last 30)")
-    st.dataframe(results.style.applymap(highlight_winloss, subset=["Win/Loss"]))
-
-    # Summary
-    total = len(results)
-    wins = (results["Win/Loss"] == "✅ Win").sum()
-    losses = total - wins
-    st.markdown(f"**✅ Wins:** {wins} | ❌ Losses: {losses} | 🧠 Accuracy: `{wins/total*100:.1f}%`")
-
-    # Chart
-    st.subheader("📈 Error Over Time")
-    fig, ax = plt.subplots()
-    ax.plot(results["Error"], marker="o", label="Absolute Error")
-    ax.set_title("Prediction Error")
-    ax.set_ylabel("Error")
-    ax.legend()
-    st.pyplot(fig)
-else:
-    st.info("Not enough data for accuracy trend (need 30+ rows).")
+# ========== FOOTER ==========
+st.caption("🔁 Built with ❤️ for Crash Prediction & Simulation")
