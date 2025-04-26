@@ -23,7 +23,13 @@ def get_multiplier_from_seed(server_seed, client_seed, nonce):
     X = r / 2**52
     if X == 1: return 1.0
     crash_point = 99 / (1 - X)
-    return round(max(1.0, crash_point) / 100, 2)
+    multiplier = round(max(1.0, crash_point) / 100, 2)
+
+    # --- New Logic: if multiplier > 4.0, set it to 2.0x ---
+    if multiplier > 4.0:
+        multiplier = 2.0
+
+    return multiplier
 
 # --- Load and Save History ---
 def load_history():
