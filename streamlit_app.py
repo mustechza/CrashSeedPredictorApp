@@ -49,7 +49,7 @@ def reset_with_backup():
 
 # --- Streamlit Layout ---
 st.set_page_config(page_title="Crash Predictor", layout="wide")
-st.title("🎯 Crash Predictor: Seed Logic + Live Feedback")
+st.title("🎯 Crash Predictor: Seed Logic + Recovery Planner")
 st.sidebar.title("Controls")
 
 if st.sidebar.button("Reset & Backup History"):
@@ -83,7 +83,7 @@ if submitted:
 
 st.markdown("---")
 
-# --- Prediction History ---
+# --- Prediction History Table ---
 st.header("📊 Prediction History (Last 20)")
 if not history.empty:
     def highlight_result(row):
@@ -126,21 +126,21 @@ with col1:
     placeholder = st.empty()
     for i in range(0, wins+1):
         placeholder.markdown(f"<h3 style='text-align: center; color: green;'>{i}</h3>", unsafe_allow_html=True)
-        time.sleep(0.005)
+        time.sleep(0.002)
     st.markdown("<p style='text-align: center;'>Wins</p>", unsafe_allow_html=True)
 
 with col2:
     placeholder = st.empty()
     for i in range(0, losses+1):
         placeholder.markdown(f"<h3 style='text-align: center; color: red;'>{i}</h3>", unsafe_allow_html=True)
-        time.sleep(0.005)
+        time.sleep(0.002)
     st.markdown("<p style='text-align: center;'>Losses</p>", unsafe_allow_html=True)
 
 with col3:
     placeholder = st.empty()
     for i in range(0, int(win_rate)+1):
         placeholder.markdown(f"<h3 style='text-align: center; color: {win_color};'>{i}%</h3>", unsafe_allow_html=True)
-        time.sleep(0.005)
+        time.sleep(0.002)
     st.markdown("<p style='text-align: center;'>Win Rate</p>", unsafe_allow_html=True)
 
 with col4:
@@ -148,3 +148,66 @@ with col4:
     st.markdown("<p style='text-align: center;'>Current Streak</p>", unsafe_allow_html=True)
 
 st.markdown("---")
+
+# --- Live Updating Chart of Win Rate ---
+if not history.empty:
+    st.header("📈 Win Rate Over Time")
+    win_rates = []
+    wins_count = 0
+    for i, result in enumerate(history['result']):
+        if result == "Win":
+            wins_count += 1
+        win_rates.append((wins_count / (i+1)) * 100)
+
+    chart_data = pd.DataFrame({
+        "Win Rate %": win_rates
+    })
+    st.line_chart(chart_data)
+
+st.markdown("---")
+
+# --- Automatic Loss Recovery and Martingale Planner ---
+st.header("🛠️ Recovery Planner")
+
+if not history.empty:
+    last_row = history.iloc[-1]
+    losses_streak = 0
+    for result in reversed(history['result']):
+        if result == 'Loss':
+            losses_streak += 1
+        else:
+            break
+
+    if losses_streak > 0:
+        st.warning(f"⚡ Current Loss Streak: **{losses_streak} losses**")
+
+        recovery_mode = st.selectbox("Recovery Mode:", ["Normal (x2 bet)", "Aggressive (x2.5 bet)"])
+        base_bet = st.number_input("Enter your last bet amount ($)", value=1.00, step=0.01)
+        target_profit = st.number_input("Target profit ($)", value=base_bet, step=0.01)
+
+        recovery_multiplier = 2.0 if recovery_mode == "Normal (x2 bet)" else 2.5
+
+        st.subheader("Recovery Plan")
+        bets = []
+        bet = base_bet
+        total_loss = 0
+
+        for i in range(losses_streak):
+            bets.append(bet)
+            total_loss += bet
+            bet *= recovery_multiplier
+
+        recovery_plan = pd.DataFrame({
+            "Round": list(range(1, len(bets)+1)),
+            "Bet Amount ($)": [round(b, 2) for b in bets],
+            "Cumulative Loss ($)": [round(sum(bets[:i+1]), 2) for i in range(len(bets))]
+        })
+        st.dataframe(recovery_plan)
+
+        suggested_multiplier = round((total_loss + target_profit) / bets[-1] + 0.10, 2)
+        st.success(f"Suggested Minimum Target Multiplier for Recovery: **{suggested_multiplier}x**")
+
+    else:
+        st.info("✅ No active loss streak. No recovery needed.")
+else:
+    st.info("No predictions yet.")
