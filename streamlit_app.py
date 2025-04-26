@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import hmac
 import hashlib
 import os
 from datetime import datetime
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
 
+# --- Config ---
 HISTORY_FILE = "prediction_history.csv"
 SERVER_SEED = st.secrets.get("SERVER_SEED", "01a24e141597617f167daef1901514260952f2e64a49adcd829e6813c80305ac")
 
@@ -25,26 +24,18 @@ def get_multiplier_from_seed(server_seed, client_seed, nonce):
     crash_point = 99 / (1 - X)
     return round(max(1.0, crash_point) / 100, 2)
 
-# --- ML Model Training ---
-def train_model(X, y):
-    model = GradientBoostingRegressor()
-    model.fit(X, y)
-    return model
-
-# --- Load History ---
+# --- Load and Save History ---
 def load_history():
     if os.path.exists(HISTORY_FILE):
         return pd.read_csv(HISTORY_FILE)
     return pd.DataFrame(columns=["timestamp", "client_seed", "nonce", "actual", "predicted", "result"])
 
-# --- Save Prediction ---
 def save_prediction(client_seed, nonce, actual, predicted):
     df = load_history()
     result = "Win" if round(predicted, 2) == round(actual, 2) else "Loss"
     df.loc[len(df)] = [datetime.now(), client_seed, nonce, actual, predicted, result]
     df.to_csv(HISTORY_FILE, index=False)
 
-# --- Reset with Backup ---
 def reset_with_backup():
     if os.path.exists(HISTORY_FILE):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -54,49 +45,44 @@ def reset_with_backup():
     else:
         st.sidebar.warning("No history to reset.")
 
-# --- Streamlit UI ---
-st.title("Crash Predictor: ML + Seed Logic + Feedback")
-st.sidebar.title("Controls")
+# --- UI Layout ---
+st.set_page_config(page_title="Crash Predictor", layout="centered")
+st.title("🎯 Crash Predictor (Seed-Based Only)")
 
+# --- Sidebar ---
+st.sidebar.title("Controls")
 if st.sidebar.button("Reset & Backup History"):
     reset_with_backup()
 
-st.header("1. Submit Recent Crash Data")
-recent_data_input = st.text_input("Enter last 8 crash multipliers (comma-separated):", "1.52,1.11,1.32,2.58,2.35,3.99,1.19,1.05")
-recent_data = [float(x.strip()) for x in recent_data_input.split(",") if x.strip()]
-if len(recent_data) < 8:
-    st.warning("Need 8 values.")
-    st.stop()
+st.sidebar.info("Predictions based on server seed + client seed + nonce.")
 
-# --- ML Prediction ---
-X = pd.DataFrame([recent_data[i:i+4] for i in range(len(recent_data)-4)])
-y = recent_data[4:]
-model = train_model(X, y)
+# --- Prediction Form ---
+st.header("1. Live Crash Result Submission")
 
-st.header("2. Predict Next Crash")
-last_input = pd.DataFrame([recent_data[-4:]])
-ml_prediction = round(float(model.predict(last_input)[0]), 2)
-st.success(f"ML Prediction: **{ml_prediction}x**")
+# Session state for nonce
+if "last_nonce" not in st.session_state:
+    st.session_state.last_nonce = 0
 
-st.header("3. Submit Live Result")
-with st.form("live_result_form"):
+with st.form("prediction_form"):
     client_seed = st.text_input("Client Seed", "97439433b0745d23902d5c53fd1de03d")
-    nonce = st.number_input("Nonce", value=15141, step=1)
+    nonce = st.number_input("Nonce", value=st.session_state.last_nonce, step=1)
     actual_multiplier = st.number_input("Actual Crash Multiplier", value=1.00, step=0.01, format="%.2f")
-    submitted = st.form_submit_button("Submit")
+    submitted = st.form_submit_button("Submit Result")
 
 if submitted:
-    # Predict from seed
-    seed_prediction = get_multiplier_from_seed(SERVER_SEED, client_seed, int(nonce))
-    st.write(f"Seed-based Prediction: **{seed_prediction}x**")
+    predicted = get_multiplier_from_seed(SERVER_SEED, client_seed, int(nonce))
+    st.success(f"Predicted Multiplier: **{predicted}x**")
+    
+    save_prediction(client_seed, nonce, actual_multiplier, predicted)
+    st.success("✅ Result saved!")
 
-    # Save prediction result
-    save_prediction(client_seed, nonce, actual_multiplier, ml_prediction)
-    st.success("Result saved with feedback.")
+    # Auto-increment nonce
+    st.session_state.last_nonce = nonce + 1
 
 # --- History Table ---
-st.header("📊 Prediction History (Last 20)")
+st.header("2. 📊 Prediction History (Latest 20)")
 history = load_history().tail(20)
+
 if not history.empty:
     def highlight_result(row):
         color = 'green' if row['result'] == 'Win' else 'red'
@@ -108,8 +94,23 @@ if not history.empty:
     wins = (history['result'] == 'Win').sum()
     losses = total - wins
     win_rate = (wins / total) * 100 if total else 0
-    st.metric("Wins", wins)
-    st.metric("Losses", losses)
-    st.metric("Accuracy (%)", round(win_rate, 2))
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Wins", wins)
+    col2.metric("Losses", losses)
+    col3.metric("Accuracy (%)", round(win_rate, 2))
+
+    # Accuracy Trend Chart
+    st.subheader("3. 📈 Accuracy Trend")
+    history['rolling_accuracy'] = (history['result'] == 'Win').rolling(window=10).mean() * 100
+
+    fig, ax = plt.subplots()
+    ax.plot(history['rolling_accuracy'], marker='o')
+    ax.set_title('Rolling Accuracy (Last 10)')
+    ax.set_ylabel('Accuracy %')
+    ax.set_xlabel('Prediction #')
+    ax.grid(True)
+    st.pyplot(fig)
+
 else:
-    st.info("No predictions yet.")
+    st.info("No predictions yet. Submit a live result first.")
