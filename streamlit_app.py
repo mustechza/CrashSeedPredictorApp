@@ -33,7 +33,7 @@ def load_history():
 
 def save_prediction(client_seed, nonce, actual, predicted):
     df = load_history()
-    result = "Win" if round(predicted, 2) == round(actual, 2) else "Loss"
+    result = "Win" if actual >= predicted else "Loss"
     df.loc[len(df)] = [datetime.now(), client_seed, nonce, actual, predicted, result]
     df.to_csv(HISTORY_FILE, index=False)
 
@@ -57,9 +57,8 @@ if st.sidebar.button("Reset & Backup History"):
 
 st.header("1. Submit Live Crash Result")
 
-# Autofill client_seed and nonce based on last entry
+# Autofill client_seed and nonce
 history = load_history()
-
 if not history.empty:
     last_nonce = history['nonce'].max() + 1
     default_client_seed = history['client_seed'].iloc[-1]
@@ -74,20 +73,17 @@ with st.form("live_result_form"):
     submitted = st.form_submit_button("Submit")
 
 if submitted:
-    # Predict from seed
     seed_prediction = get_multiplier_from_seed(SERVER_SEED, client_seed, int(nonce))
     st.success(f"Seed-based Prediction: **{seed_prediction}x**")
 
-    # Save prediction
     save_prediction(client_seed, nonce, actual_multiplier, seed_prediction)
-    st.success("Result saved with feedback.")
+    st.success("Result saved.")
 
-    # Reload history after save
     history = load_history()
 
 st.markdown("---")
 
-# --- Prediction History Table ---
+# --- Prediction History ---
 st.header("📊 Prediction History (Last 20)")
 if not history.empty:
     def highlight_result(row):
@@ -96,20 +92,18 @@ if not history.empty:
 
     st.dataframe(history.tail(20).style.apply(highlight_result, axis=1))
 else:
-    st.info("🕒 No predictions yet. Start by submitting a result!")
+    st.info("🕒 No predictions yet.")
 
 st.markdown("---")
 
-# --- Animated Performance Summary ---
+# --- Performance Summary ---
 st.markdown("## 📋 Performance Summary")
-
 if not history.empty and "result" in history.columns:
     total = len(history)
     wins = (history['result'] == 'Win').sum()
     losses = total - wins
     win_rate = (wins / total) * 100 if total else 0
 
-    # Calculate current streak
     streak = 0
     last_result = None
     for result in reversed(history['result']):
@@ -119,37 +113,34 @@ if not history.empty and "result" in history.columns:
         else:
             break
     current_streak = f"{streak} {last_result}s" if last_result else "N/A"
-
 else:
     total = wins = losses = win_rate = 0
     current_streak = "N/A"
 
-# Dynamic color choices
 win_color = "green" if win_rate >= 55 else ("orange" if 45 <= win_rate < 55 else "red")
 streak_color = "green" if "Win" in current_streak else "red"
 
-# Animated counters
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     placeholder = st.empty()
     for i in range(0, wins+1):
         placeholder.markdown(f"<h3 style='text-align: center; color: green;'>{i}</h3>", unsafe_allow_html=True)
-        time.sleep(0.01)
+        time.sleep(0.005)
     st.markdown("<p style='text-align: center;'>Wins</p>", unsafe_allow_html=True)
 
 with col2:
     placeholder = st.empty()
     for i in range(0, losses+1):
         placeholder.markdown(f"<h3 style='text-align: center; color: red;'>{i}</h3>", unsafe_allow_html=True)
-        time.sleep(0.01)
+        time.sleep(0.005)
     st.markdown("<p style='text-align: center;'>Losses</p>", unsafe_allow_html=True)
 
 with col3:
     placeholder = st.empty()
     for i in range(0, int(win_rate)+1):
         placeholder.markdown(f"<h3 style='text-align: center; color: {win_color};'>{i}%</h3>", unsafe_allow_html=True)
-        time.sleep(0.01)
+        time.sleep(0.005)
     st.markdown("<p style='text-align: center;'>Win Rate</p>", unsafe_allow_html=True)
 
 with col4:
