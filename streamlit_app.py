@@ -62,83 +62,76 @@ def reset_with_backup():
     else:
         st.sidebar.warning("No history to reset.")
 
-# --- App UI ---
+# --- UI ---
 st.set_page_config(page_title="Crash Predictor", layout="wide")
 
 st.title("🚀 Crash Predictor (Seed Based)")
 
-col1, col2 = st.columns([2, 2])
+# Compact input form
+with st.container():
+    col1, col2, col3 = st.columns([3, 2, 2])
+    with col1:
+        st.subheader("Live Data Input")
+        with st.form("predict_form", clear_on_submit=False):
+            client_seed = st.text_input("Client Seed", "97439433b0745d23902d5c53fd1de03d")
+            last_nonce = load_history()["nonce"].max() if not load_history().empty else 0
+            nonce = st.number_input("Nonce (autofilled)", value=int(last_nonce) + 1, step=1)
+            submit_predict = st.form_submit_button("Predict")
+    with col2:
+        if submit_predict:
+            predicted_multiplier = get_multiplier_from_seed(SERVER_SEED, client_seed, int(nonce))
 
-with col1:
-    st.header("Submit Live Data")
-    with st.form("live_data_form"):
-        client_seed = st.text_input("Client Seed", "97439433b0745d23902d5c53fd1de03d")
-        last_nonce = load_history()["nonce"].max() if not load_history().empty else 0
-        nonce = st.number_input("Nonce (autofilled)", value=int(last_nonce) + 1, step=1)
-        submitted = st.form_submit_button("Predict")
+            if predicted_multiplier > 4:
+                suggested_multiplier = 2.0
+            else:
+                suggested_multiplier = predicted_multiplier
 
-with col2:
-    if submitted:
-        # Predict
-        predicted_multiplier = get_multiplier_from_seed(SERVER_SEED, client_seed, int(nonce))
+            st.metric("🎯 Predicted", f"{predicted_multiplier}x")
+            st.metric("✅ Suggested", f"{suggested_multiplier}x")
 
-        # Adjust prediction if needed
-        if predicted_multiplier > 4:
-            suggested_multiplier = 2.0
-        else:
-            suggested_multiplier = predicted_multiplier
+    with col3:
+        if submit_predict:
+            st.subheader("Submit Actual")
+            actual_multiplier = st.number_input("Actual Multiplier", value=1.00, step=0.01, format="%.2f")
+            submit_actual = st.button("Submit Result")
 
-        st.metric("🎯 Predicted Multiplier", f"{predicted_multiplier}x")
-        st.metric("✅ Suggested Multiplier", f"{suggested_multiplier}x")
-
-        st.success("Now enter the *actual* result below to record and track accuracy.")
+            if submit_actual:
+                save_prediction(client_seed, nonce, actual_multiplier, suggested_multiplier)
+                st.success("Result saved!")
 
 st.divider()
 
-st.header("Submit Actual Result")
-col3, col4 = st.columns(2)
-
-with col3:
-    actual_multiplier = st.number_input("Actual Crash Multiplier", value=1.00, step=0.01, format="%.2f")
-    confirm_actual = st.button("Submit Result")
-
-if confirm_actual and submitted:
-    save_prediction(client_seed, nonce, actual_multiplier, suggested_multiplier)
-    st.success("Result saved with feedback!")
-
-# --- History Section ---
-st.divider()
+# History
 st.subheader("📊 Prediction History (Last 15)")
 history = load_history().tail(15)
 
 if not history.empty:
-    def color_result(val):
-        color = 'green' if val == 'Win' else 'red'
-        return f'color: {color}'
-
-    st.dataframe(history.style.applymap(color_result, subset=["result"]), use_container_width=True)
+    st.dataframe(
+        history.style.applymap(lambda v: 'color: green' if v == 'Win' else 'color: red', subset=['result']),
+        use_container_width=True,
+        height=400
+    )
 
     win_rate = (history['result'] == 'Win').mean() * 100
-    st.metric("Accuracy (%)", f"{win_rate:.2f}%")
+    st.metric("Overall Accuracy", f"{win_rate:.2f}%")
 
-    # Animated chart
     chart_data = history.copy()
-    chart_data["index"] = range(len(chart_data))
+    chart_data["Index"] = range(len(chart_data))
 
-    line_chart = alt.Chart(chart_data).mark_line(point=True).encode(
-        x=alt.X('index', title='Prediction Number'),
+    chart = alt.Chart(chart_data).mark_line(point=True).encode(
+        x=alt.X('Index', title='Prediction Number'),
         y=alt.Y('actual', title='Actual Multiplier'),
         color=alt.Color('result', scale=alt.Scale(domain=['Win', 'Loss'], range=['green', 'red']))
     ).properties(
-        width=800,
+        width=900,
         height=300
     ).interactive()
 
-    st.altair_chart(line_chart, use_container_width=True)
+    st.altair_chart(chart, use_container_width=True)
 else:
-    st.info("No predictions yet.")
+    st.info("No history available yet.")
 
-# --- Sidebar Reset Button ---
+# Sidebar backup button
 with st.sidebar:
     st.title("Settings")
     if st.button("Reset & Backup History"):
