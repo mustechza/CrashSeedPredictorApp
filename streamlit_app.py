@@ -5,9 +5,9 @@ import hmac
 import hashlib
 import os
 from datetime import datetime
-import plotly.graph_objects as go
+import altair as alt
 
-# --- Constants ---
+# Constants
 HISTORY_FILE = "prediction_history.csv"
 SERVER_SEED = st.secrets.get("SERVER_SEED", "01a24e141597617f167daef1901514260952f2e64a49adcd829e6813c80305ac")
 
@@ -25,18 +25,34 @@ def get_multiplier_from_seed(server_seed, client_seed, nonce):
     crash_point = 99 / (1 - X)
     return round(max(1.0, crash_point) / 100, 2)
 
-# --- History Management ---
+# --- Load History ---
 def load_history():
     if os.path.exists(HISTORY_FILE):
         return pd.read_csv(HISTORY_FILE)
-    return pd.DataFrame(columns=["timestamp", "client_seed", "nonce", "actual", "predicted", "result"])
+    return pd.DataFrame(columns=["timestamp", "client_seed", "nonce", "actual", "predicted", "result", "recovery_bet"])
 
+# --- Save Prediction ---
 def save_prediction(client_seed, nonce, actual, predicted):
     df = load_history()
-    result = "Win" if actual > predicted else "Loss"
-    df.loc[len(df)] = [datetime.now(), client_seed, nonce, actual, predicted, result]
+    result = "Win" if actual >= predicted else "Loss"
+
+    recovery_bet = 1
+    if result == "Loss":
+        recovery_bet = round(2 * (1 / predicted), 2)
+
+    new_row = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "client_seed": client_seed,
+        "nonce": nonce,
+        "actual": actual,
+        "predicted": predicted,
+        "result": result,
+        "recovery_bet": recovery_bet
+    }
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     df.to_csv(HISTORY_FILE, index=False)
 
+# --- Reset with Backup ---
 def reset_with_backup():
     if os.path.exists(HISTORY_FILE):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -46,95 +62,84 @@ def reset_with_backup():
     else:
         st.sidebar.warning("No history to reset.")
 
-# --- Streamlit UI ---
+# --- App UI ---
 st.set_page_config(page_title="Crash Predictor", layout="wide")
-st.title("🎯 Crash Predictor (Seed-Based)")
-st.sidebar.title("Controls")
 
-if st.sidebar.button("🔄 Reset & Backup History"):
-    reset_with_backup()
+st.title("🚀 Crash Predictor (Seed Based)")
 
-# --- Step 1: Live Prediction ---
-st.header("1. Predict Next Multiplier")
+col1, col2 = st.columns([2, 2])
 
-col1, col2 = st.columns(2)
 with col1:
-    client_seed = st.text_input("Client Seed", "97439433b0745d23902d5c53fd1de03d")
+    st.header("Submit Live Data")
+    with st.form("live_data_form"):
+        client_seed = st.text_input("Client Seed", "97439433b0745d23902d5c53fd1de03d")
+        last_nonce = load_history()["nonce"].max() if not load_history().empty else 0
+        nonce = st.number_input("Nonce (autofilled)", value=int(last_nonce) + 1, step=1)
+        submitted = st.form_submit_button("Predict")
+
 with col2:
-    last_nonce = int(load_history()['nonce'].max()) + 1 if not load_history().empty else 0
-    nonce = st.number_input("Nonce (auto-filled)", value=last_nonce, step=1)
+    if submitted:
+        # Predict
+        predicted_multiplier = get_multiplier_from_seed(SERVER_SEED, client_seed, int(nonce))
 
-predicted_multiplier = get_multiplier_from_seed(SERVER_SEED, client_seed, int(nonce))
+        # Adjust prediction if needed
+        if predicted_multiplier > 4:
+            suggested_multiplier = 2.0
+        else:
+            suggested_multiplier = predicted_multiplier
 
-# Logic to adjust prediction if too high
-if predicted_multiplier > 4.0:
-    predicted_multiplier = 2.0
+        st.metric("🎯 Predicted Multiplier", f"{predicted_multiplier}x")
+        st.metric("✅ Suggested Multiplier", f"{suggested_multiplier}x")
 
-st.success(f"📈 Predicted Multiplier: **{predicted_multiplier}x**")
+        st.success("Now enter the *actual* result below to record and track accuracy.")
 
-# --- Step 2: Enter Actual Result ---
-st.header("2. Submit Live Result")
-with st.form("live_result_form"):
+st.divider()
+
+st.header("Submit Actual Result")
+col3, col4 = st.columns(2)
+
+with col3:
     actual_multiplier = st.number_input("Actual Crash Multiplier", value=1.00, step=0.01, format="%.2f")
-    submitted = st.form_submit_button("Submit Result")
+    confirm_actual = st.button("Submit Result")
 
-if submitted:
-    save_prediction(client_seed, nonce, actual_multiplier, predicted_multiplier)
-    st.success("✅ Result saved!")
+if confirm_actual and submitted:
+    save_prediction(client_seed, nonce, actual_multiplier, suggested_multiplier)
+    st.success("Result saved with feedback!")
 
-# --- Step 3: Prediction History ---
-st.header("📊 Prediction History")
-
-history = load_history()
+# --- History Section ---
+st.divider()
+st.subheader("📊 Prediction History (Last 15)")
+history = load_history().tail(15)
 
 if not history.empty:
-    col3, col4, col5 = st.columns(3)
-    total = len(history)
-    wins = (history['result'] == 'Win').sum()
-    losses = total - wins
-    win_rate = (wins / total) * 100 if total else 0
+    def color_result(val):
+        color = 'green' if val == 'Win' else 'red'
+        return f'color: {color}'
 
-    col3.metric("Total Predictions", total)
-    col4.metric("Wins", wins)
-    col5.metric("Accuracy (%)", round(win_rate, 2))
+    st.dataframe(history.style.applymap(color_result, subset=["result"]), use_container_width=True)
 
-    # Animated Win/Loss Line Chart
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        y=(history['result'] == 'Win').astype(int).cumsum(),
-        mode='lines+markers',
-        line=dict(color='limegreen', width=3),
-        name="Cumulative Wins",
-    ))
-    fig.update_layout(
-        title="Win Trend Over Time",
-        xaxis_title="Prediction #",
-        yaxis_title="Cumulative Wins",
-        template="plotly_white",
-        height=400,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    win_rate = (history['result'] == 'Win').mean() * 100
+    st.metric("Accuracy (%)", f"{win_rate:.2f}%")
 
-    # Show styled table
-    def highlight_result(row):
-        color = 'green' if row['result'] == 'Win' else 'red'
-        return [f'color: {color}' if col == 'result' else '' for col in row.index]
+    # Animated chart
+    chart_data = history.copy()
+    chart_data["index"] = range(len(chart_data))
 
-    st.dataframe(history.tail(20).style.apply(highlight_result, axis=1))
+    line_chart = alt.Chart(chart_data).mark_line(point=True).encode(
+        x=alt.X('index', title='Prediction Number'),
+        y=alt.Y('actual', title='Actual Multiplier'),
+        color=alt.Color('result', scale=alt.Scale(domain=['Win', 'Loss'], range=['green', 'red']))
+    ).properties(
+        width=800,
+        height=300
+    ).interactive()
 
+    st.altair_chart(line_chart, use_container_width=True)
 else:
     st.info("No predictions yet.")
 
-# --- Step 4: Loss Recovery Suggestion ---
-st.header("🛡️ Loss Recovery Calculator")
-
-if not history.empty:
-    last_result = history.iloc[-1]['result']
-    if last_result == "Loss":
-        st.warning("⚠️ Last round was a Loss. Suggesting Recovery Bet...")
-        recovery_target = round(predicted_multiplier + 0.10, 2)
-        st.info(f"🎯 Suggested Recovery Target: **{recovery_target}x** (Next Predicted must beat {recovery_target}x)")
-    else:
-        st.success("✅ No recovery needed. Last round was a Win!")
-else:
-    st.info("Submit some results to activate recovery suggestions.")
+# --- Sidebar Reset Button ---
+with st.sidebar:
+    st.title("Settings")
+    if st.button("Reset & Backup History"):
+        reset_with_backup()
