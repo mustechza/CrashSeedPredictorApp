@@ -5,3 +5,72 @@ numpy
 pandas
 plotly
 altair
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+import ta
+import datetime
+import time
+
+st.set_page_config(layout="wide")
+st.title("Green Line Strategy - 1-Min Live Dashboard")
+
+symbol = st.text_input("Enter Symbol (e.g., EURUSD=X for Forex)", "EURUSD=X")
+interval = "1m"
+period = "1d"
+
+@st.cache_data(ttl=60)
+def load_data():
+    df = yf.download(tickers=symbol, interval=interval, period=period)
+    df = df[['Open', 'High', 'Low', 'Close']]
+    df.dropna(inplace=True)
+    
+    df['EMA_7'] = ta.trend.ema_indicator(df['Close'], window=7).ema_indicator()
+    df['EMA_20'] = ta.trend.ema_indicator(df['Close'], window=20).ema_indicator()
+
+    macd = ta.trend.MACD(df['Close'])
+    df['MACD'] = macd.macd()
+    df['MACD_hist'] = macd.macd_diff()
+
+    df['Signal'] = None
+    for i in range(1, len(df)):
+        if (
+            df['Close'][i] > df['EMA_7'][i] and
+            df['EMA_7'][i] > df['EMA_20'][i] and
+            df['MACD_hist'][i] > 0 and
+            df['Close'][i - 1] < df['EMA_7'][i - 1]
+        ):
+            df.at[i, 'Signal'] = 'CALL'
+        elif (
+            df['Close'][i] < df['EMA_7'][i] and
+            df['EMA_7'][i] < df['EMA_20'][i] and
+            df['MACD_hist'][i] < 0 and
+            df['Close'][i - 1] > df['EMA_7'][i - 1]
+        ):
+            df.at[i, 'Signal'] = 'PUT'
+
+    return df
+
+data = load_data()
+
+st.subheader("Latest Signals")
+latest_signals = data[data['Signal'].notnull()][-5:]
+st.dataframe(latest_signals[['Close', 'EMA_7', 'EMA_20', 'MACD_hist', 'Signal']])
+
+import plotly.graph_objects as go
+fig = go.Figure()
+
+fig.add_trace(go.Scatter(x=data.index, y=data['Close'], name='Price', line=dict(color='white')))
+fig.add_trace(go.Scatter(x=data.index, y=data['EMA_7'], name='EMA 7', line=dict(color='green')))
+fig.add_trace(go.Scatter(x=data.index, y=data['EMA_20'], name='EMA 20', line=dict(color='orange')))
+
+calls = data[data['Signal'] == 'CALL']
+puts = data[data['Signal'] == 'PUT']
+
+fig.add_trace(go.Scatter(x=calls.index, y=calls['Close'], mode='markers', name='CALL', marker=dict(color='lime', symbol='triangle-up', size=10)))
+fig.add_trace(go.Scatter(x=puts.index, y=puts['Close'], mode='markers', name='PUT', marker=dict(color='red', symbol='triangle-down', size=10)))
+
+fig.update_layout(title="Green Line Strategy Chart", xaxis_title="Time", yaxis_title="Price", template='plotly_dark', height=600)
+st.plotly_chart(fig, use_container_width=True)
+
+st.caption("Data refreshes every 60 seconds. Built with love using Streamlit + TA + yFinance.")
