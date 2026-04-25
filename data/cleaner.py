@@ -1,24 +1,30 @@
 import pandas as pd
 
+FEATURES = [
+    "rolling_mean",
+    "rolling_std",
+    "round_duration",
+    "prep_gap",
+    "delta"
+]
+
 def clean_data(df):
     df = df.copy()
 
-    df = df.dropna()
+    df = df.dropna(subset=["crash"])
 
-    # Core feature
-    df["crash"] = df["crash"].astype(float)
-
-    # Time-based features
+    # Time features
     df["round_duration"] = (df["endTime"] - df["beginTime"]).dt.total_seconds()
     df["prep_gap"] = (df["beginTime"] - df["prepareTime"]).dt.total_seconds()
 
-    # Rolling stats
+    # Rolling features
     df["rolling_mean"] = df["crash"].rolling(10).mean()
     df["rolling_std"] = df["crash"].rolling(10).std()
 
-    # Volatility proxy
+    # Momentum
     df["delta"] = df["crash"].diff()
 
-    df = df.dropna()
+    # Drop NaNs ONLY after feature creation
+    df = df.dropna(subset=FEATURES)
 
     return df
