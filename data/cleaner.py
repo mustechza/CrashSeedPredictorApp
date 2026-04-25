@@ -11,16 +11,28 @@ FEATURES = [
 def clean_data(df):
     df = df.copy()
 
+    # ----------------------------
     # TARGET
-    df["crash"] = df["rate"].astype(float)
+    # ----------------------------
+    df["crash"] = pd.to_numeric(df["rate"], errors="coerce")
 
-    # TIME CONVERSION
+    # ----------------------------
+    # TIME PARSING
+    # ----------------------------
     df["prepareTime"] = pd.to_datetime(df["prepareTime"], unit="ms", errors="coerce")
     df["beginTime"] = pd.to_datetime(df["beginTime"], unit="ms", errors="coerce")
     df["endTime"] = pd.to_datetime(df["endTime"], unit="ms", errors="coerce")
     df["fetchedAt"] = pd.to_datetime(df["fetchedAt"], errors="coerce")
 
-    # FEATURES
+    # ----------------------------
+    # IMPORTANT FIX:
+    # Convert to ML order (OLD → NEW)
+    # ----------------------------
+    df = df.sort_values(by="fetchedAt", ascending=True).reset_index(drop=True)
+
+    # ----------------------------
+    # FEATURE ENGINEERING
+    # ----------------------------
     df["round_duration"] = (df["endTime"] - df["beginTime"]).dt.total_seconds()
     df["prep_gap"] = (df["beginTime"] - df["prepareTime"]).dt.total_seconds()
 
@@ -28,7 +40,9 @@ def clean_data(df):
     df["rolling_std"] = df["crash"].rolling(10).std()
     df["delta"] = df["crash"].diff()
 
-    # FINAL CLEAN
+    # ----------------------------
+    # CLEAN FINAL DATASET
+    # ----------------------------
     df = df.dropna(subset=FEATURES + ["crash"])
 
     return df
