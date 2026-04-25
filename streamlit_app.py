@@ -72,9 +72,16 @@ if st.session_state.df is None:
 # Clean data
 df = clean_data(st.session_state.df)
 
-st.subheader("📊 Live Data")
-st.dataframe(df.tail(20), use_container_width=True)
+st.subheader("📊 Live Data (Latest Rounds)")
 
+# Ensure consistent ordering (important)
+df_sorted = df.sort_values(by="fetchedAt", ascending=False)
+
+# Show latest 20 rounds
+st.dataframe(
+    df_sorted.head(20),
+    use_container_width=True
+)
 # -------------------------------
 # TRAIN MODEL
 # -------------------------------
