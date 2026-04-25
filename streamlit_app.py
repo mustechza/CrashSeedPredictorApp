@@ -74,14 +74,14 @@ df = clean_data(st.session_state.df)
 
 st.subheader("📊 Live Data (Latest Rounds)")
 
-# Ensure consistent ordering (important)
-df_sorted = df.sort_values(by="fetchedAt", ascending=False)
+# Ensure datetime is valid
+df["fetchedAt"] = pd.to_datetime(df["fetchedAt"], errors="coerce")
 
-# Show latest 20 rounds
-st.dataframe(
-    df_sorted.head(20),
-    use_container_width=True
-)
+# Sort properly
+df_sorted = df.sort_values("fetchedAt", ascending=False).reset_index(drop=True)
+
+# Show latest 20
+st.dataframe(df_sorted.head(20), use_container_width=True)
 # -------------------------------
 # TRAIN MODEL
 # -------------------------------
