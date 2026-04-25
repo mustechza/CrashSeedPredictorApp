@@ -157,3 +157,20 @@ col1, col2, col3 = st.columns(3)
 col1.metric("Rounds", len(df))
 col2.metric("Last Crash", round(df["crash"].iloc[-1], 2))
 col3.metric("Hit Rate ≥1.5x", f"{(df['crash'] >= 1.5).mean():.2%}")
+
+# -------------------------------
+# FULL MULTIPLIER HISTORY
+# -------------------------------
+st.subheader("📈 Full Multiplier History (First → Last)")
+
+# Ensure correct time order (oldest to newest)
+df_history = df.sort_values(by="fetchedAt", ascending=True).reset_index(drop=True)
+
+st.line_chart(df_history["crash"])
+
+# Optional table view
+with st.expander("📊 View Raw Multiplier List"):
+    st.dataframe(
+        df_history[["fetchedAt", "crash"]],
+        use_container_width=True
+    )
