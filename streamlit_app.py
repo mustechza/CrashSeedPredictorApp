@@ -2,11 +2,11 @@ import streamlit as st
 import pandas as pd
 
 from data.loader import load_data
-from data.cleaner import clean_data
+from data.cleaner import clean_data, FEATURES
 from training.trainer import prepare_data
-from training.backtest import run_backtest
 
 from models.random_forest import RFModel
+from training.backtest import run_backtest
 from analytics.dashboard import plot_equity
 from analytics.tracker import calculate_metrics
 
@@ -14,40 +14,43 @@ st.set_page_config(layout="wide")
 st.title("🚀 Crash AI Live Dashboard")
 
 # -------------------------------
-# SESSION STATE INIT
+# SESSION STATE
 # -------------------------------
 if "df" not in st.session_state:
     st.session_state.df = None
 
 # -------------------------------
-# SIDEBAR - UPLOAD
+# UPLOAD
 # -------------------------------
-st.sidebar.header("📂 Upload Data")
+st.sidebar.header("📂 Upload JSON")
 
-uploaded_file = st.sidebar.file_uploader("Upload JSON", type=["json"])
+uploaded_file = st.sidebar.file_uploader("Upload file", type=["json"])
 
 if uploaded_file:
     df = load_data(uploaded_file)
     st.session_state.df = df
-    st.success("Data loaded successfully!")
+    st.success("Data uploaded!")
 
 # -------------------------------
-# SIDEBAR - LIVE INPUT
+# LIVE INPUT
 # -------------------------------
 st.sidebar.header("➕ Add New Round")
 
-new_rate = st.sidebar.number_input("Crash Multiplier (rate)", min_value=1.0, step=0.01)
+new_rate = st.sidebar.number_input("Crash Multiplier", min_value=1.0, step=0.01)
 
 if st.sidebar.button("Add Round"):
     if st.session_state.df is not None:
+        now = pd.Timestamp.now()
+
         new_row = pd.DataFrame([{
             "rate": str(new_rate),
-            "prepareTime": pd.Timestamp.now(),
-            "beginTime": pd.Timestamp.now(),
-            "endTime": pd.Timestamp.now(),
-            "hash": "live_input",
-            "salt": "live_input",
-            "fetchedAt": pd.Timestamp.now()
+            "crash": float(new_rate),
+            "prepareTime": now,
+            "beginTime": now,
+            "endTime": now,
+            "hash": "live",
+            "salt": "live",
+            "fetchedAt": now
         }])
 
         st.session_state.df = pd.concat(
@@ -55,31 +58,28 @@ if st.sidebar.button("Add Round"):
             ignore_index=True
         )
 
-        st.success(f"Added new round: {new_rate}")
+        st.success(f"Added: {new_rate}")
     else:
-        st.warning("Upload data first!")
+        st.warning("Upload data first")
 
 # -------------------------------
-# MAIN APP
+# MAIN
 # -------------------------------
 if st.session_state.df is None:
-    st.info("Upload a JSON file to begin")
+    st.info("Upload a dataset to begin")
     st.stop()
 
 # Clean data
 df = clean_data(st.session_state.df)
 
-# -------------------------------
-# DISPLAY DATA
-# -------------------------------
 st.subheader("📊 Live Data")
 st.dataframe(df.tail(20), use_container_width=True)
 
 # -------------------------------
-# MODEL TRAINING
+# TRAIN MODEL
 # -------------------------------
 if len(df) < 30:
-    st.warning("Need at least 30 rounds for stable predictions")
+    st.warning("Need at least 30 clean rows")
     st.stop()
 
 X_train, X_test, y_train, y_test = prepare_data(df)
@@ -88,29 +88,34 @@ model = RFModel()
 model.train(X_train, y_train)
 
 # -------------------------------
-# LIVE PREDICTION
+# SAFE LIVE PREDICTION (FIXED)
 # -------------------------------
-features = [
-    "rolling_mean",
-    "rolling_std",
-    "round_duration",
-    "prep_gap",
-    "delta"
-]
+last_row = df.iloc[[-1]]  # KEEP AS DATAFRAME
 
-last_row = df.iloc[-1]
-X_live = [last_row[features].values]
+# Ensure feature consistency
+if not all(f in last_row.columns for f in FEATURES):
+    st.error("Feature mismatch — check data pipeline")
+    st.stop()
+
+X_live = last_row[FEATURES]
+
+# DEBUG (optional)
+# st.write("Train shape:", X_train.shape)
+# st.write("Live shape:", X_live.shape)
 
 prediction = model.predict(X_live)[0]
 proba = model.predict_proba(X_live)[0][1]
 
-st.subheader("🤖 Next Round Prediction")
+# -------------------------------
+# DISPLAY PREDICTION
+# -------------------------------
+st.subheader("🤖 Next Prediction")
 
 col1, col2 = st.columns(2)
 
 with col1:
     if prediction == 1:
-        st.success("✅ BET (Target ≥ 1.5x)")
+        st.success("✅ BET (≥ 1.5x)")
     else:
         st.error("⛔ SKIP")
 
@@ -136,15 +141,12 @@ st.subheader("📈 Equity Curve")
 plot_equity(history)
 
 # -------------------------------
-# EXTRA INSIGHTS
+# QUICK STATS
 # -------------------------------
-st.subheader("📌 Quick Stats")
+st.subheader("📌 Stats")
 
 col1, col2, col3 = st.columns(3)
 
-col1.metric("Total Rounds", len(df))
+col1.metric("Rounds", len(df))
 col2.metric("Last Crash", round(df["crash"].iloc[-1], 2))
-col3.metric(
-    "Hit Rate ≥1.5x",
-    f"{(df['crash'] >= 1.5).mean():.2%}"
-)
+col3.metric("Hit Rate ≥1.5x", f"{(df['crash'] >= 1.5).mean():.2%}")
