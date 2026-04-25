@@ -1,19 +1,6 @@
-# Core
-streamlit==1.33.0
-pandas==2.2.2
-numpy==1.26.4
-
-# Visualization
-matplotlib==3.8.4
-
-# Machine Learning
-scikit-learn==1.4.2
-
-# Deep Learning (for LSTM)
-tensorflow==2.15.0
-
-# Optional (faster data handling / future upgrades)
-scipy==1.13.1
-
-# Utilities
-joblib==1.4.2
+streamlit
+pandas
+numpy
+matplotlib
+scikit-learn
+joblib
