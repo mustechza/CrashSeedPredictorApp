@@ -21,7 +21,7 @@ if "df" not in st.session_state:
     st.session_state.df = None
 
 # -------------------------------
-# MODEL CACHE (IMPORTANT)
+# MODEL CACHE
 # -------------------------------
 @st.cache_resource
 def get_model(X_train, y_train):
@@ -30,7 +30,7 @@ def get_model(X_train, y_train):
     return model
 
 # -------------------------------
-# UPLOAD
+# SIDEBAR - UPLOAD
 # -------------------------------
 uploaded_file = st.sidebar.file_uploader("Upload JSON", type=["json"])
 
@@ -40,7 +40,7 @@ if uploaded_file:
     st.success("Data loaded!")
 
 # -------------------------------
-# LIVE INPUT
+# SIDEBAR - LIVE INPUT
 # -------------------------------
 new_rate = st.sidebar.number_input("Crash Multiplier", min_value=1.0, step=0.01)
 
@@ -69,7 +69,7 @@ if st.sidebar.button("Add Round"):
         st.warning("Upload data first")
 
 # -------------------------------
-# CHECK
+# CHECK DATA
 # -------------------------------
 if st.session_state.df is None:
     st.info("Upload data to begin")
@@ -84,16 +84,7 @@ df_ml = df.sort_values("fetchedAt", ascending=True).reset_index(drop=True)
 df_ui = df.sort_values("fetchedAt", ascending=False).reset_index(drop=True)
 
 # -------------------------------
-# UI
-# -------------------------------
-st.subheader("📊 Latest Rounds")
-st.dataframe(df_ui.head(20), use_container_width=True)
-
-st.subheader("📈 Multiplier History")
-st.line_chart(df_ml["crash"])
-
-# -------------------------------
-# REQUIRE DATA
+# REQUIRE MIN DATA
 # -------------------------------
 if len(df_ml) < 30:
     st.warning("Need at least 30 rounds")
@@ -106,7 +97,7 @@ X_train, X_test, y_train, y_test = prepare_data(df_ml)
 model = get_model(X_train, y_train)
 
 # -------------------------------
-# FEATURE ENGINEERING (LIVE)
+# FEATURE ENGINEERING
 # -------------------------------
 def calculate_features(df):
     last_10 = df.tail(10)["crash"]
@@ -142,7 +133,7 @@ confidence += proba * 50
 if volatility > 1.5:
     confidence += 15
 
-# Low streak boost (bounce logic)
+# Low streak boost
 if low_streak >= 6:
     confidence += 20
 
@@ -163,24 +154,38 @@ else:
     signal = "❌ SKIP"
 
 # -------------------------------
-# DISPLAY SIGNAL
+# 🚀 AI DECISION (TOP)
 # -------------------------------
-st.subheader("🤖 AI Decision Engine")
+st.markdown("## 🔥 LIVE AI DECISION")
 
 col1, col2, col3 = st.columns(3)
-
 col1.metric("Signal", signal)
 col2.metric("Confidence", f"{confidence:.1f}%")
 col3.metric("ML Probability", f"{proba:.2%}")
 
 # -------------------------------
-# DEBUG INSIGHTS
+# INSIGHTS
 # -------------------------------
 with st.expander("🧠 AI Insights"):
     st.write(f"Volatility: {volatility:.2f}")
     st.write(f"Average: {avg:.2f}")
     st.write(f"Low streak (<2x): {low_streak}")
     st.write(f"High streak (>3x): {high_streak}")
+
+# -------------------------------
+# UI TABLE
+# -------------------------------
+st.subheader("📊 Latest Rounds")
+st.dataframe(df_ui.head(20), use_container_width=True)
+
+# -------------------------------
+# CHART
+# -------------------------------
+st.subheader("📈 Multiplier History")
+st.line_chart(df_ml["crash"])
+
+with st.expander("View Raw Timeline"):
+    st.dataframe(df_ml[["fetchedAt", "crash"]], use_container_width=True)
 
 # -------------------------------
 # BACKTEST
