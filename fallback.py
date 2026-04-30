@@ -243,6 +243,32 @@ col4.metric("🎯 Target", f"{target}x" if target else "No Trade")
 col5.metric("🧠 Regime", regime_data["regime"])
 
 # -------------------------------
+# LAST 10 MULTIPLIERS
+# -------------------------------
+st.markdown("### 📉 Last 10 Multipliers")
+
+last_10 = df_ml["crash"].tail(10).to_numpy()[::-1]
+cols = st.columns(10)
+
+for i, val in enumerate(last_10):
+    color = "green" if val >= 2 else "red"
+
+    cols[i].markdown(
+        f"""
+        <div style="
+            background-color:{color};
+            padding:10px;
+            border-radius:10px;
+            text-align:center;
+            color:white;
+            font-weight:bold;">
+            {val:.2f}x
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+# -------------------------------
 # INSIGHTS
 # -------------------------------
 with st.expander("🧠 AI + Regime Insights"):
