@@ -8,7 +8,7 @@ from training.trainer import prepare_data
 from models.random_forest import RFModel
 
 st.set_page_config(layout="wide")
-st.title("🚀 Crash AI v3 - Regime Adaptive Engine")
+st.title("🚀 Crash AI v4 - Adaptive Intelligence Engine")
 
 # -------------------------------
 # SESSION STATE
@@ -16,11 +16,14 @@ st.title("🚀 Crash AI v3 - Regime Adaptive Engine")
 if "df" not in st.session_state:
     st.session_state.df = None
 
+if "version" not in st.session_state:
+    st.session_state.version = 0  # used to force retrain
+
 # -------------------------------
-# MODEL CACHE
+# MODEL CACHE (AUTO REFRESH)
 # -------------------------------
 @st.cache_resource
-def get_model(X, y):
+def get_model(X, y, version):
     model = RFModel()
     model.train(X, y)
     return model
@@ -32,6 +35,7 @@ file = st.sidebar.file_uploader("Upload JSON", type=["json"])
 
 if file:
     st.session_state.df = load_data(file)
+    st.session_state.version += 1
     st.success("Data loaded!")
 
 # -------------------------------
@@ -55,6 +59,7 @@ if st.sidebar.button("Add Round"):
         }])
 
         st.session_state.df = pd.concat([st.session_state.df, row], ignore_index=True)
+        st.session_state.version += 1
         st.success("Round added")
 
 # -------------------------------
@@ -80,18 +85,30 @@ if len(df_ml) < 50:
 # TRAIN MODEL
 # -------------------------------
 X_train, X_test, y_train, y_test = prepare_data(df_ml)
-model = get_model(X_train, y_train)
+model = get_model(X_train, y_train, st.session_state.version)
+
+# -------------------------------
+# TRUE STREAK CALCULATION
+# -------------------------------
+def get_true_streak(series, condition):
+    streak = 0
+    for val in reversed(series):
+        if condition(val):
+            streak += 1
+        else:
+            break
+    return streak
 
 # -------------------------------
 # CONTEXT FEATURES
 # -------------------------------
 def get_context(df):
-    last_10 = df.tail(10)["crash"]
+    last_20 = df.tail(20)["crash"]
 
     return {
-        "volatility": last_10.std(),
-        "low_streak": sum(last_10 < 2),
-        "high_streak": sum(last_10 > 3)
+        "volatility": last_20.std(),
+        "low_streak": get_true_streak(last_20, lambda x: x < 2),
+        "high_streak": get_true_streak(last_20, lambda x: x > 3),
     }
 
 ctx = get_context(df_ml)
@@ -100,18 +117,18 @@ ctx = get_context(df_ml)
 # REGIME DETECTION
 # -------------------------------
 def detect_regime(df):
-    last_20 = df.tail(20)["crash"]
+    last_30 = df.tail(30)["crash"]
 
-    avg = last_20.mean()
-    std = last_20.std()
-    low_ratio = (last_20 < 2).mean()
-    high_ratio = (last_20 > 3).mean()
+    avg = last_30.mean()
+    std = last_30.std()
+    low_ratio = (last_30 < 2).mean()
+    high_ratio = (last_30 > 3).mean()
 
-    if std > 2.5:
+    if std > 2.8:
         regime = "⚡ VOLATILE"
-    elif low_ratio > 0.6:
+    elif low_ratio > 0.65:
         regime = "🔴 CHOPPY"
-    elif high_ratio > 0.4:
+    elif high_ratio > 0.45:
         regime = "🟢 HOT"
     else:
         regime = "🟡 NORMAL"
@@ -135,33 +152,34 @@ X_live = last_row[FEATURES]
 proba = model.predict_proba(X_live)[0][1]
 
 # -------------------------------
-# CONFIDENCE ENGINE
+# SMOOTH CONFIDENCE ENGINE
 # -------------------------------
-confidence = proba * 50
+confidence = proba * 60  # stronger ML weight
 
-if ctx["volatility"] > 1.5:
-    confidence += 15
+# volatility boost
+confidence += min(ctx["volatility"] * 10, 20)
 
-if ctx["low_streak"] >= 6:
-    confidence += 20
+# streak logic (REAL streak)
+if ctx["low_streak"] >= 5:
+    confidence += 25
 
-if ctx["high_streak"] >= 5:
-    confidence -= 15
+if ctx["high_streak"] >= 4:
+    confidence -= 20
 
-# Regime adjustment
+# regime adjustments
 if regime_data["regime"] == "⚡ VOLATILE":
     confidence += 10
 elif regime_data["regime"] == "🔴 CHOPPY":
-    confidence -= 20
+    confidence -= 25
 elif regime_data["regime"] == "🟢 HOT":
-    confidence += 15
+    confidence += 20
 
 confidence = max(0, min(100, confidence))
 
 # -------------------------------
-# ADAPTIVE MULTIPLIER ENGINE
+# SMART MULTIPLIER ENGINE
 # -------------------------------
-def evaluate_multiplier(df, target, window=80):
+def evaluate_multiplier(df, target, window=100):
     balance = 0
     stake = 1
 
@@ -170,13 +188,14 @@ def evaluate_multiplier(df, target, window=80):
     for i in range(start, len(df) - 1):
         crash = df.iloc[i + 1]["crash"]
 
+        weight = 1 + (i / len(df))  # recent rounds weighted more
+
         if crash >= target:
-            balance += stake * (target - 1)
+            balance += weight * (target - 1)
         else:
-            balance -= stake
+            balance -= weight
 
     return balance
-
 
 def get_adaptive_multipliers(df):
     multipliers = [1.3, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0]
@@ -188,22 +207,17 @@ def get_adaptive_multipliers(df):
 
     res = pd.DataFrame(results, columns=["m", "profit"])
 
-    low = res[res["m"] <= 1.6]
-    mid = res[(res["m"] > 1.6) & (res["m"] <= 2.3)]
-    high = res[res["m"] > 2.3]
-
     return {
-        "low": low.sort_values("profit", ascending=False).iloc[0]["m"],
-        "mid": mid.sort_values("profit", ascending=False).iloc[0]["m"],
-        "high": high.sort_values("profit", ascending=False).iloc[0]["m"],
+        "low": res.nsmallest(3, "m").sort_values("profit", ascending=False).iloc[0]["m"],
+        "mid": res[(res["m"] > 1.6) & (res["m"] <= 2.3)].sort_values("profit", ascending=False).iloc[0]["m"],
+        "high": res.nlargest(3, "m").sort_values("profit", ascending=False).iloc[0]["m"],
         "table": res.sort_values("profit", ascending=False)
     }
-
 
 adaptive = get_adaptive_multipliers(df_ml)
 
 # -------------------------------
-# SIGNAL ENGINE (REGIME AWARE)
+# SIGNAL ENGINE
 # -------------------------------
 if confidence > 80:
     signal = "🔥 STRONG BET"
@@ -211,26 +225,18 @@ if confidence > 80:
 
 elif confidence > 60:
     signal = "✅ BET"
-
-    if regime_data["regime"] == "🟢 HOT":
-        target = adaptive["high"]
-    else:
-        target = adaptive["mid"]
+    target = adaptive["mid"]
 
 elif confidence > 50:
     signal = "⚠️ SMALL BET"
-
-    if regime_data["regime"] == "🔴 CHOPPY":
-        target = adaptive["low"]
-    else:
-        target = adaptive["mid"]
+    target = adaptive["low"]
 
 else:
     signal = "❌ SKIP"
     target = None
 
 # -------------------------------
-# UI - TOP DASHBOARD
+# UI
 # -------------------------------
 st.markdown("## 🔥 LIVE AI DECISION")
 
@@ -243,7 +249,7 @@ col4.metric("🎯 Target", f"{target}x" if target else "No Trade")
 col5.metric("🧠 Regime", regime_data["regime"])
 
 # -------------------------------
-# LAST 10 MULTIPLIERS
+# LAST 10 MULTIPLIERS (IMPROVED)
 # -------------------------------
 st.markdown("### 📉 Last 10 Multipliers")
 
@@ -251,7 +257,12 @@ last_10 = df_ml["crash"].tail(10).to_numpy()[::-1]
 cols = st.columns(10)
 
 for i, val in enumerate(last_10):
-    color = "green" if val >= 2 else "red"
+    if val >= 3:
+        color = "#00c853"
+    elif val >= 2:
+        color = "#64dd17"
+    else:
+        color = "#d50000"
 
     cols[i].markdown(
         f"""
@@ -272,23 +283,17 @@ for i, val in enumerate(last_10):
 # INSIGHTS
 # -------------------------------
 with st.expander("🧠 AI + Regime Insights"):
-    st.write(f"Volatility: {ctx['volatility']:.2f}")
-    st.write(f"Low streak: {ctx['low_streak']}")
-    st.write(f"High streak: {ctx['high_streak']}")
-    st.write("---")
-    st.write(f"Regime avg: {regime_data['avg']:.2f}")
-    st.write(f"Regime std: {regime_data['std']:.2f}")
-    st.write(f"Low ratio: {regime_data['low_ratio']:.2%}")
-    st.write(f"High ratio: {regime_data['high_ratio']:.2%}")
+    st.write(ctx)
+    st.write(regime_data)
 
 # -------------------------------
-# MULTIPLIER PERFORMANCE TABLE
+# MULTIPLIERS TABLE
 # -------------------------------
 st.subheader("🎯 Adaptive Multiplier Performance")
 st.dataframe(adaptive["table"], use_container_width=True)
 
 # -------------------------------
-# DATA VIEW
+# DATA
 # -------------------------------
 st.subheader("📊 Latest Rounds")
 st.dataframe(df_ui.head(20), use_container_width=True)
