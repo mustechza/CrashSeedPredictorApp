@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,7 +9,7 @@ from training.trainer import prepare_data
 from models.random_forest import RFModel
 
 st.set_page_config(layout="wide")
-st.title("🚀 Crash AI v3 - Regime Adaptive Engine")
+st.title("🚀 Crash AI v4 - Pro Engine")
 
 # -------------------------------
 # SESSION STATE
@@ -16,17 +17,17 @@ st.title("🚀 Crash AI v3 - Regime Adaptive Engine")
 if "df" not in st.session_state:
     st.session_state.df = None
 
-# -------------------------------
-# MODEL CACHE
-# -------------------------------
-@st.cache_resource
-def get_model(X, y):
-    model = RFModel()
-    model.train(X, y)
-    return model
+if "model" not in st.session_state:
+    st.session_state.model = None
+
+if "last_train_size" not in st.session_state:
+    st.session_state.last_train_size = 0
+
+if "proba_history" not in st.session_state:
+    st.session_state.proba_history = []
 
 # -------------------------------
-# UPLOAD DATA
+# LOAD DATA
 # -------------------------------
 file = st.sidebar.file_uploader("Upload JSON", type=["json"])
 
@@ -72,15 +73,57 @@ df = clean_data(st.session_state.df)
 df_ml = df.sort_values("fetchedAt").reset_index(drop=True)
 df_ui = df.sort_values("fetchedAt", ascending=False)
 
-if len(df_ml) < 50:
-    st.warning("Need at least 50 rounds")
+if len(df_ml) < 100:
+    st.warning("Need at least 100 rounds")
     st.stop()
 
 # -------------------------------
-# TRAIN MODEL
+# SMART RETRAIN
 # -------------------------------
-X_train, X_test, y_train, y_test = prepare_data(df_ml)
-model = get_model(X_train, y_train)
+def get_model_incremental(df_ml):
+    X, _, y, _ = prepare_data(df_ml)
+
+    current_size = len(df_ml)
+
+    if st.session_state.model is None:
+        model = RFModel()
+        weights = np.linspace(0.5, 2.0, len(X))
+        model.model.fit(X, y, sample_weight=weights)
+
+        st.session_state.model = model
+        st.session_state.last_train_size = current_size
+        return model
+
+    if current_size - st.session_state.last_train_size >= 10:
+        recent = df_ml.tail(300)
+
+        X_r, _, y_r, _ = prepare_data(recent)
+
+        model = RFModel()
+        weights = np.linspace(0.5, 2.0, len(X_r))
+        model.model.fit(X_r, y_r, sample_weight=weights)
+
+        st.session_state.model = model
+        st.session_state.last_train_size = current_size
+
+        st.warning("🔁 Model retrained")
+
+    return st.session_state.model
+
+model = get_model_incremental(df_ml)
+
+# -------------------------------
+# ML PREDICTION
+# -------------------------------
+last_row = df_ml.iloc[[-1]]
+X_live = last_row[FEATURES]
+
+proba = model.model.predict_proba(X_live)[0][1]
+
+# Smooth predictions
+st.session_state.proba_history.append(proba)
+st.session_state.proba_history = st.session_state.proba_history[-5:]
+proba = np.mean(st.session_state.proba_history)
 
 # -------------------------------
 # CONTEXT FEATURES
@@ -108,31 +151,89 @@ def detect_regime(df):
     high_ratio = (last_20 > 3).mean()
 
     if std > 2.5:
-        regime = "⚡ VOLATILE"
+        return "⚡ VOLATILE"
     elif low_ratio > 0.6:
-        regime = "🔴 CHOPPY"
+        return "🔴 CHOPPY"
     elif high_ratio > 0.4:
-        regime = "🟢 HOT"
+        return "🟢 HOT"
     else:
-        regime = "🟡 NORMAL"
+        return "🟡 NORMAL"
 
-    return {
-        "regime": regime,
-        "avg": avg,
-        "std": std,
-        "low_ratio": low_ratio,
-        "high_ratio": high_ratio
-    }
-
-regime_data = detect_regime(df_ml)
+regime = detect_regime(df_ml)
 
 # -------------------------------
-# ML PREDICTION
+# PRO ENGINE
 # -------------------------------
-last_row = df_ml.iloc[[-1]]
-X_live = last_row[FEATURES]
+def evaluate_trade(crash, target, stake):
+    return stake * (target - 1) if crash >= target else -stake
 
-proba = model.predict_proba(X_live)[0][1]
+def simulate(df, target):
+    balance = 0
+    curve = []
+    max_bal = 0
+    dd_list = []
+
+    for i in range(len(df) - 1):
+        crash = df.iloc[i + 1]["crash"]
+        pnl = evaluate_trade(crash, target, 1)
+
+        balance += pnl
+        max_bal = max(max_bal, balance)
+        dd_list.append(max_bal - balance)
+        curve.append(balance)
+
+    return balance, max(dd_list) if dd_list else 0, curve
+
+def walk_forward(df, multipliers):
+    results = []
+
+    start = 0
+    train = 200
+    test = 20
+
+    while True:
+        train_end = start + train
+        test_end = train_end + test
+
+        if test_end >= len(df):
+            break
+
+        train_df = df.iloc[start:train_end]
+        test_df = df.iloc[train_end:test_end]
+
+        scores = []
+
+        for m in multipliers:
+            bal, _, _ = simulate(train_df, m)
+            scores.append((m, bal))
+
+        best_m = max(scores, key=lambda x: x[1])[0]
+
+        test_bal, dd, _ = simulate(test_df, best_m)
+
+        results.append({
+            "multiplier": best_m,
+            "profit": test_bal,
+            "drawdown": dd
+        })
+
+        start += test
+
+    return pd.DataFrame(results)
+
+multipliers = [1.3,1.5,1.8,2.0,2.2,2.5,3.0]
+wf_df = walk_forward(df_ml, multipliers)
+
+if not wf_df.empty:
+    best_m = wf_df.groupby("multiplier")["profit"].mean().idxmax()
+
+    wf_profit = wf_df["profit"].sum()
+    wf_win = (wf_df["profit"] > 0).mean()
+    wf_dd = wf_df["drawdown"].mean()
+    wf_score = wf_profit * wf_win / (1 + wf_dd)
+else:
+    best_m = None
+    wf_score = -999
 
 # -------------------------------
 # CONFIDENCE ENGINE
@@ -148,124 +249,77 @@ if ctx["low_streak"] >= 6:
 if ctx["high_streak"] >= 5:
     confidence -= 15
 
-# Regime adjustment
-if regime_data["regime"] == "⚡ VOLATILE":
+if regime == "⚡ VOLATILE":
     confidence += 10
-elif regime_data["regime"] == "🔴 CHOPPY":
+elif regime == "🔴 CHOPPY":
     confidence -= 20
-elif regime_data["regime"] == "🟢 HOT":
+elif regime == "🟢 HOT":
     confidence += 15
 
 confidence = max(0, min(100, confidence))
 
 # -------------------------------
-# ADAPTIVE MULTIPLIER ENGINE
+# FINAL DECISION
 # -------------------------------
-def evaluate_multiplier(df, target, window=80):
-    balance = 0
-    stake = 1
-
-    start = max(30, len(df) - window)
-
-    for i in range(start, len(df) - 1):
-        crash = df.iloc[i + 1]["crash"]
-
-        if crash >= target:
-            balance += stake * (target - 1)
-        else:
-            balance -= stake
-
-    return balance
-
-
-def get_adaptive_multipliers(df):
-    multipliers = [1.3, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0]
-
-    results = []
-    for m in multipliers:
-        profit = evaluate_multiplier(df, m)
-        results.append((m, profit))
-
-    res = pd.DataFrame(results, columns=["m", "profit"])
-
-    low = res[res["m"] <= 1.6]
-    mid = res[(res["m"] > 1.6) & (res["m"] <= 2.3)]
-    high = res[res["m"] > 2.3]
-
-    return {
-        "low": low.sort_values("profit", ascending=False).iloc[0]["m"],
-        "mid": mid.sort_values("profit", ascending=False).iloc[0]["m"],
-        "high": high.sort_values("profit", ascending=False).iloc[0]["m"],
-        "table": res.sort_values("profit", ascending=False)
-    }
-
-
-adaptive = get_adaptive_multipliers(df_ml)
-
-# -------------------------------
-# SIGNAL ENGINE (REGIME AWARE)
-# -------------------------------
-if confidence > 80:
+if confidence > 75 and wf_score > 0:
     signal = "🔥 STRONG BET"
-    target = adaptive["high"]
-
+    target = best_m
 elif confidence > 60:
     signal = "✅ BET"
-
-    if regime_data["regime"] == "🟢 HOT":
-        target = adaptive["high"]
-    else:
-        target = adaptive["mid"]
-
+    target = best_m
 elif confidence > 50:
     signal = "⚠️ SMALL BET"
-
-    if regime_data["regime"] == "🔴 CHOPPY":
-        target = adaptive["low"]
-    else:
-        target = adaptive["mid"]
-
+    target = best_m
 else:
     signal = "❌ SKIP"
     target = None
 
 # -------------------------------
-# UI - TOP DASHBOARD
+# UI
 # -------------------------------
 st.markdown("## 🔥 LIVE AI DECISION")
 
-col1, col2, col3, col4, col5 = st.columns(5)
+c1, c2, c3, c4, c5 = st.columns(5)
 
-col1.metric("Signal", signal)
-col2.metric("Confidence", f"{confidence:.1f}%")
-col3.metric("ML Prob", f"{proba:.2%}")
-col4.metric("🎯 Target", f"{target}x" if target else "No Trade")
-col5.metric("🧠 Regime", regime_data["regime"])
-
-# -------------------------------
-# INSIGHTS
-# -------------------------------
-with st.expander("🧠 AI + Regime Insights"):
-    st.write(f"Volatility: {ctx['volatility']:.2f}")
-    st.write(f"Low streak: {ctx['low_streak']}")
-    st.write(f"High streak: {ctx['high_streak']}")
-    st.write("---")
-    st.write(f"Regime avg: {regime_data['avg']:.2f}")
-    st.write(f"Regime std: {regime_data['std']:.2f}")
-    st.write(f"Low ratio: {regime_data['low_ratio']:.2%}")
-    st.write(f"High ratio: {regime_data['high_ratio']:.2%}")
+c1.metric("Signal", signal)
+c2.metric("Confidence", f"{confidence:.1f}%")
+c3.metric("ML Prob", f"{proba:.2%}")
+c4.metric("🎯 Target", f"{target}x" if target else "No Trade")
+c5.metric("🧠 Regime", regime)
 
 # -------------------------------
-# MULTIPLIER PERFORMANCE TABLE
+# WFV METRICS
 # -------------------------------
-st.subheader("🎯 Adaptive Multiplier Performance")
-st.dataframe(adaptive["table"], use_container_width=True)
+st.subheader("🧪 Walk-Forward Performance")
+
+if not wf_df.empty:
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("WF Profit", f"{wf_profit:.2f}")
+    col2.metric("Win Rate", f"{wf_win:.2%}")
+    col3.metric("Drawdown", f"{wf_dd:.2f}")
+
+    st.dataframe(wf_df, use_container_width=True)
+    st.line_chart(wf_df["profit"])
 
 # -------------------------------
-# DATA VIEW
+# EQUITY CURVE
 # -------------------------------
-st.subheader("📊 Latest Rounds")
+if target:
+    st.subheader("💰 Equity Curve")
+
+    bal, dd, curve = simulate(df_ml.tail(300), target)
+
+    st.line_chart(curve)
+    st.metric("Balance", f"{bal:.2f}")
+    st.metric("Max DD", f"{dd:.2f}")
+
+# -------------------------------
+# DATA
+# -------------------------------
+st.subheader("📊 Recent Rounds")
 st.dataframe(df_ui.head(20), use_container_width=True)
 
-st.subheader("📈 Crash History")
+st.subheader("📈 Crash Chart")
 st.line_chart(df_ml["crash"])
+```
