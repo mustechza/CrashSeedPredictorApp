@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import hashlib
+import os
 
 from data.loader import load_data
 from data.cleaner import clean_data, FEATURES
@@ -11,16 +13,34 @@ st.set_page_config(layout="wide")
 st.title("🚀 Crash AI - Institutional Engine")
 
 # -------------------------------
-# SESSION STATE
+# SESSION STATE + PERSISTENCE
 # -------------------------------
+DATA_PATH = "data/live_data.csv"
+
+def load_persistent_data():
+    if os.path.exists(DATA_PATH):
+        return pd.read_csv(DATA_PATH, parse_dates=True)
+    return None
+
+def save_persistent_data(df):
+    df.to_csv(DATA_PATH, index=False)
+
 if "df" not in st.session_state:
-    st.session_state.df = None
+    st.session_state.df = load_persistent_data()
 
 # -------------------------------
-# MODEL CACHE
+# MODEL VERSION (HASH)
+# -------------------------------
+def get_data_version(df):
+    return hashlib.md5(
+        pd.util.hash_pandas_object(df, index=True).values
+    ).hexdigest()
+
+# -------------------------------
+# MODEL CACHE (FIXED)
 # -------------------------------
 @st.cache_resource
-def get_model(X, y):
+def get_model(X, y, version):
     model = RFModel()
     model.train(X, y)
     return model
@@ -32,6 +52,7 @@ file = st.sidebar.file_uploader("Upload JSON", type=["json"])
 
 if file:
     st.session_state.df = load_data(file)
+    save_persistent_data(st.session_state.df)
     st.success("Data loaded!")
 
 # -------------------------------
@@ -55,6 +76,8 @@ if st.sidebar.button("Add Round"):
         }])
 
         st.session_state.df = pd.concat([st.session_state.df, row], ignore_index=True)
+        save_persistent_data(st.session_state.df)
+
         st.success("Round added")
 
 # -------------------------------
@@ -77,17 +100,17 @@ if len(df_ml) < 50:
     st.stop()
 
 # -------------------------------
-# TRAIN MODEL
+# TRAIN MODEL (FIXED)
 # -------------------------------
 X_train, X_test, y_train, y_test = prepare_data(df_ml)
 
-# 🔒 SAFETY: ensure FEATURES exist
 missing_cols = [col for col in FEATURES if col not in df_ml.columns]
 if missing_cols:
     st.error(f"Missing features: {missing_cols}")
     st.stop()
 
-model = get_model(X_train, y_train)
+version = get_data_version(df_ml)
+model = get_model(X_train, y_train, version)
 
 # -------------------------------
 # CONTEXT
@@ -104,7 +127,7 @@ def get_context(df):
 ctx = get_context(df_ml)
 
 # -------------------------------
-# OVERDUE EDGE (FIXED)
+# OVERDUE
 # -------------------------------
 def overdue_factor(df):
     if len(df) < 5:
@@ -125,7 +148,7 @@ def overdue_factor(df):
 overdue = overdue_factor(df_ml)
 
 # -------------------------------
-# REGIME DETECTION
+# REGIME
 # -------------------------------
 def detect_regime(df):
     last_20 = df.tail(20)["crash"]
@@ -164,34 +187,10 @@ last_row = df_ml.iloc[[-1]]
 X_live = last_row[FEATURES].fillna(0)
 
 proba = model.predict_proba(X_live)[0].max()
-confidence = proba * 100
+confidence = np.clip(proba * 100, 0, 100)
 
 # -------------------------------
-# CONFIDENCE ADJUSTMENTS
-# -------------------------------
-if ctx["volatility"] > 1.5:
-    confidence += 5
-
-if ctx["low_streak"] >= 6:
-    confidence += 10
-
-if ctx["high_streak"] >= 5:
-    confidence -= 10
-
-if overdue >= 5:
-    confidence += 12
-
-if regime_data["regime"] == "⚡ VOLATILE":
-    confidence += 5
-elif regime_data["regime"] == "🔴 CHOPPY":
-    confidence -= 15
-elif regime_data["regime"] == "🟢 HOT":
-    confidence += 10
-
-confidence = max(0, min(100, confidence))
-
-# -------------------------------
-# BACKTEST ENGINE
+# BACKTEST
 # -------------------------------
 def evaluate_multiplier(df, target, window=80):
     balance = 100
@@ -226,14 +225,6 @@ def get_best_multiplier(df):
 target, perf_table = get_best_multiplier(df_ml)
 
 # -------------------------------
-# REGIME TARGET ADJUSTMENT
-# -------------------------------
-if regime_data["regime"] == "🔴 CHOPPY":
-    target = min(target, 1.6)
-elif regime_data["regime"] == "⚡ VOLATILE":
-    target = max(target, 2.0)
-
-# -------------------------------
 # WIN RATE
 # -------------------------------
 def win_rate(df, target, window=80):
@@ -253,7 +244,7 @@ def win_rate(df, target, window=80):
 wr = win_rate(df_ml, target)
 
 # -------------------------------
-# SIGNAL ENGINE
+# SIGNAL
 # -------------------------------
 if confidence > 75 and wr > 0.55:
     signal = "🔥 STRONG BET"
@@ -281,7 +272,7 @@ col5.metric("🧠 Regime", regime_data["regime"])
 col6.metric("Win Rate", f"{wr:.2%}")
 
 # -------------------------------
-# LAST 10 MULTIPLIERS
+# LAST 10
 # -------------------------------
 st.markdown("### 📉 Last 10 Multipliers")
 
@@ -307,26 +298,11 @@ for i, val in enumerate(last_10):
     )
 
 # -------------------------------
-# INSIGHTS
-# -------------------------------
-with st.expander("🧠 AI Insights"):
-    st.write(f"Volatility: {ctx['volatility']:.2f}")
-    st.write(f"Low streak: {ctx['low_streak']}")
-    st.write(f"High streak: {ctx['high_streak']}")
-    st.write(f"Overdue: {overdue}")
-    st.write("---")
-    st.write(f"Regime avg: {regime_data['avg']:.2f}")
-    st.write(f"Regime std: {regime_data['std']:.2f}")
-
-# -------------------------------
-# PERFORMANCE TABLE
+# TABLES
 # -------------------------------
 st.subheader("🎯 Multiplier Performance")
 st.dataframe(perf_table, use_container_width=True)
 
-# -------------------------------
-# DATA VIEW
-# -------------------------------
 st.subheader("📊 Latest Rounds")
 st.dataframe(df_ui.head(20), use_container_width=True)
 
