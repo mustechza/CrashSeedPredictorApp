@@ -4,16 +4,17 @@ import numpy as np
 import hashlib
 import os
 
+from sklearn.metrics import mean_absolute_error
+
 from data.loader import load_data
 from data.cleaner import clean_data, FEATURES
-from training.trainer import prepare_data
 from models.random_forest import RFModel
 
 st.set_page_config(layout="wide")
 st.title("🚀 Crash AI - Institutional Engine")
 
 # -------------------------------
-# SESSION STATE + PERSISTENCE
+# STORAGE
 # -------------------------------
 DATA_PATH = "data/live_data.csv"
 
@@ -25,6 +26,9 @@ def load_persistent_data():
 def save_persistent_data(df):
     df.to_csv(DATA_PATH, index=False)
 
+# -------------------------------
+# SESSION
+# -------------------------------
 if "df" not in st.session_state:
     st.session_state.df = load_persistent_data()
 
@@ -37,7 +41,7 @@ def get_data_version(df):
     ).hexdigest()
 
 # -------------------------------
-# MODEL CACHE (FIXED)
+# MODEL CACHE (FIX #5)
 # -------------------------------
 @st.cache_resource
 def get_model(X, y, version):
@@ -77,7 +81,6 @@ if st.sidebar.button("Add Round"):
 
         st.session_state.df = pd.concat([st.session_state.df, row], ignore_index=True)
         save_persistent_data(st.session_state.df)
-
         st.success("Round added")
 
 # -------------------------------
@@ -88,7 +91,7 @@ if st.session_state.df is None:
     st.stop()
 
 # -------------------------------
-# CLEAN DATA
+# CLEAN
 # -------------------------------
 df = clean_data(st.session_state.df)
 
@@ -100,24 +103,58 @@ if len(df_ml) < 50:
     st.stop()
 
 # -------------------------------
-# TRAIN MODEL (FIXED)
+# LEAK-FREE DATA PREP
 # -------------------------------
-X_train, X_test, y_train, y_test = prepare_data(df_ml)
+def prepare_data_no_leak(df):
+    df = df.copy()
 
+    # Predict NEXT round
+    df["target"] = df["crash"].shift(-1)
+
+    # Remove last row (no future)
+    df = df.dropna().reset_index(drop=True)
+
+    X = df[FEATURES]
+    y = df["target"]
+
+    # Time-based split
+    split = int(len(df) * 0.8)
+
+    X_train = X.iloc[:split]
+    y_train = y.iloc[:split]
+
+    X_test = X.iloc[split:]
+    y_test = y.iloc[split:]
+
+    return X_train, X_test, y_train, y_test, df
+
+X_train, X_test, y_train, y_test, df_shifted = prepare_data_no_leak(df_ml)
+
+# -------------------------------
+# VALIDATE FEATURES
+# -------------------------------
 missing_cols = [col for col in FEATURES if col not in df_ml.columns]
 if missing_cols:
     st.error(f"Missing features: {missing_cols}")
     st.stop()
 
+# -------------------------------
+# TRAIN MODEL (FIX #5)
+# -------------------------------
 version = get_data_version(df_ml)
 model = get_model(X_train, y_train, version)
+
+# -------------------------------
+# EVALUATE MODEL
+# -------------------------------
+y_pred = model.model.predict(X_test)
+mae = mean_absolute_error(y_test, y_pred)
 
 # -------------------------------
 # CONTEXT
 # -------------------------------
 def get_context(df):
     last_10 = df.tail(10)["crash"]
-
     return {
         "volatility": last_10.std(),
         "low_streak": int((last_10 < 2).sum()),
@@ -127,27 +164,6 @@ def get_context(df):
 ctx = get_context(df_ml)
 
 # -------------------------------
-# OVERDUE
-# -------------------------------
-def overdue_factor(df):
-    if len(df) < 5:
-        return 0
-
-    last = df.tail(15)["crash"].to_numpy()
-    mask = last < 2
-
-    streak = 0
-    for v in mask[::-1]:
-        if v:
-            streak += 1
-        else:
-            break
-
-    return streak
-
-overdue = overdue_factor(df_ml)
-
-# -------------------------------
 # REGIME
 # -------------------------------
 def detect_regime(df):
@@ -155,7 +171,6 @@ def detect_regime(df):
 
     avg = last_20.mean()
     std = last_20.std()
-
     global_std = df["crash"].rolling(100).std().mean()
 
     low_ratio = (last_20 < 2).mean()
@@ -173,21 +188,18 @@ def detect_regime(df):
     return {
         "regime": regime,
         "avg": avg,
-        "std": std,
-        "low_ratio": low_ratio,
-        "high_ratio": high_ratio
+        "std": std
     }
 
 regime_data = detect_regime(df_ml)
 
 # -------------------------------
-# ML PREDICTION
+# LIVE PREDICTION
 # -------------------------------
 last_row = df_ml.iloc[[-1]]
 X_live = last_row[FEATURES].fillna(0)
 
-proba = model.predict_proba(X_live)[0].max()
-confidence = np.clip(proba * 100, 0, 100)
+prediction = model.model.predict(X_live)[0]
 
 # -------------------------------
 # BACKTEST
@@ -225,77 +237,23 @@ def get_best_multiplier(df):
 target, perf_table = get_best_multiplier(df_ml)
 
 # -------------------------------
-# WIN RATE
-# -------------------------------
-def win_rate(df, target, window=80):
-    wins, total = 0, 0
-
-    start = max(30, len(df) - window)
-
-    for i in range(start, len(df) - 1):
-        crash = df.iloc[i + 1]["crash"]
-
-        if crash >= target:
-            wins += 1
-        total += 1
-
-    return wins / total if total else 0
-
-wr = win_rate(df_ml, target)
-
-# -------------------------------
-# SIGNAL
-# -------------------------------
-if confidence > 75 and wr > 0.55:
-    signal = "🔥 STRONG BET"
-elif confidence > 60 and wr > 0.50:
-    signal = "✅ BET"
-elif confidence > 50:
-    signal = "⚠️ SMALL BET"
-    target = min(target, 1.6)
-else:
-    signal = "❌ SKIP"
-    target = None
-
-# -------------------------------
 # DASHBOARD
 # -------------------------------
 st.markdown("## 🔥 LIVE AI DECISION")
 
-col1, col2, col3, col4, col5, col6 = st.columns(6)
+col1, col2, col3, col4, col5 = st.columns(5)
 
-col1.metric("Signal", signal)
-col2.metric("Confidence", f"{confidence:.1f}%")
-col3.metric("ML Prob", f"{proba:.2%}")
-col4.metric("🎯 Target", f"{target:.2f}x" if target else "No Trade")
-col5.metric("🧠 Regime", regime_data["regime"])
-col6.metric("Win Rate", f"{wr:.2%}")
+col1.metric("🎯 Predicted Next", f"{prediction:.2f}x")
+col2.metric("📉 MAE", f"{mae:.3f}")
+col3.metric("🎯 Best Target", f"{target:.2f}x")
+col4.metric("🧠 Regime", regime_data["regime"])
+col5.metric("Volatility", f"{ctx['volatility']:.2f}")
 
 # -------------------------------
-# LAST 10
+# CHART
 # -------------------------------
-st.markdown("### 📉 Last 10 Multipliers")
-
-last_10 = df_ml["crash"].tail(10).to_numpy()[::-1]
-cols = st.columns(10)
-
-for i, val in enumerate(last_10):
-    color = "green" if val >= 2 else "red"
-
-    cols[i].markdown(
-        f"""
-        <div style="
-            background-color:{color};
-            padding:10px;
-            border-radius:10px;
-            text-align:center;
-            color:white;
-            font-weight:bold;">
-            {val:.2f}x
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+st.subheader("📈 Crash History")
+st.line_chart(df_ml["crash"])
 
 # -------------------------------
 # TABLES
@@ -305,6 +263,3 @@ st.dataframe(perf_table, use_container_width=True)
 
 st.subheader("📊 Latest Rounds")
 st.dataframe(df_ui.head(20), use_container_width=True)
-
-st.subheader("📈 Crash History")
-st.line_chart(df_ml["crash"])
