@@ -80,6 +80,13 @@ if len(df_ml) < 50:
 # TRAIN MODEL
 # -------------------------------
 X_train, X_test, y_train, y_test = prepare_data(df_ml)
+
+# 🔒 SAFETY: ensure FEATURES exist
+missing_cols = [col for col in FEATURES if col not in df_ml.columns]
+if missing_cols:
+    st.error(f"Missing features: {missing_cols}")
+    st.stop()
+
 model = get_model(X_train, y_train)
 
 # -------------------------------
@@ -90,21 +97,25 @@ def get_context(df):
 
     return {
         "volatility": last_10.std(),
-        "low_streak": sum(last_10 < 2),
-        "high_streak": sum(last_10 > 3)
+        "low_streak": int((last_10 < 2).sum()),
+        "high_streak": int((last_10 > 3).sum())
     }
 
 ctx = get_context(df_ml)
 
 # -------------------------------
-# OVERDUE EDGE
+# OVERDUE EDGE (FIXED)
 # -------------------------------
 def overdue_factor(df):
-    last = df.tail(15)["crash"]
-    streak = 0
+    if len(df) < 5:
+        return 0
 
-    for v in reversed(last):
-        if v < 2:
+    last = df.tail(15)["crash"].to_numpy()
+    mask = last < 2
+
+    streak = 0
+    for v in mask[::-1]:
+        if v:
             streak += 1
         else:
             break
@@ -150,7 +161,7 @@ regime_data = detect_regime(df_ml)
 # ML PREDICTION
 # -------------------------------
 last_row = df_ml.iloc[[-1]]
-X_live = last_row[FEATURES]
+X_live = last_row[FEATURES].fillna(0)
 
 proba = model.predict_proba(X_live)[0].max()
 confidence = proba * 100
@@ -210,12 +221,12 @@ def get_best_multiplier(df):
     res = pd.DataFrame(results, columns=["m", "profit"])
     best = res.sort_values("profit", ascending=False).iloc[0]
 
-    return best["m"], res.sort_values("profit", ascending=False)
+    return float(best["m"]), res.sort_values("profit", ascending=False)
 
 target, perf_table = get_best_multiplier(df_ml)
 
 # -------------------------------
-# REGIME ADJUST TARGET
+# REGIME TARGET ADJUSTMENT
 # -------------------------------
 if regime_data["regime"] == "🔴 CHOPPY":
     target = min(target, 1.6)
@@ -274,7 +285,7 @@ col6.metric("Win Rate", f"{wr:.2%}")
 # -------------------------------
 st.markdown("### 📉 Last 10 Multipliers")
 
-last_10 = df_ml["crash"].tail(10).values[::-1]
+last_10 = df_ml["crash"].tail(10).to_numpy()[::-1]
 cols = st.columns(10)
 
 for i, val in enumerate(last_10):
