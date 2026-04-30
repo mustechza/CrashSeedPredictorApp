@@ -322,4 +322,3 @@ st.dataframe(df_ui.head(20), use_container_width=True)
 
 st.subheader("📈 Crash Chart")
 st.line_chart(df_ml["crash"])
-```
