@@ -31,9 +31,47 @@ def load_data(file):
 # CLEAN + FEATURE ENGINEERING
 # -------------------------------
 def clean_data(df):
-    df["crash"] = df["crash"].astype(float)
+    df = df.copy()
+
+    # -------------------------------
+    # AUTO-DETECT CRASH COLUMN
+    # -------------------------------
+    if "crash" not in df.columns:
+        if "rate" in df.columns:
+            df["crash"] = df["rate"]
+        else:
+            st.error(f"❌ No 'crash' or 'rate' column found. Columns: {list(df.columns)}")
+            st.stop()
+
+    # -------------------------------
+    # CLEAN TYPES
+    # -------------------------------
+    df["crash"] = pd.to_numeric(df["crash"], errors="coerce")
+
+    # Timestamp handling
+    if "fetchedAt" in df.columns:
+        df["fetchedAt"] = pd.to_datetime(df["fetchedAt"], errors="coerce")
+    else:
+        df["fetchedAt"] = pd.Timestamp.now()
+
+    # Drop bad rows
+    df = df.dropna(subset=["crash"])
+
+    # Sort
     df = df.sort_values("fetchedAt").reset_index(drop=True)
 
+    # -------------------------------
+    # FEATURES
+    # -------------------------------
+    for i in range(1, 6):
+        df[f"lag_{i}"] = df["crash"].shift(i)
+
+    df["mean_5"] = df["crash"].rolling(5).mean()
+    df["std_5"] = df["crash"].rolling(5).std()
+
+    df.dropna(inplace=True)
+
+    return df
     # Sequence features
     for i in range(1, 6):
         df[f"lag_{i}"] = df["crash"].shift(i)
