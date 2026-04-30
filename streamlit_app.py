@@ -17,15 +17,6 @@ if "df" not in st.session_state:
     st.session_state.df = None
 
 # -------------------------------
-# SIDEBAR SETTINGS (NEW)
-# -------------------------------
-st.sidebar.header("💰 Bankroll Settings")
-
-bankroll = st.sidebar.number_input("Bankroll", value=100.0)
-risk_pct = st.sidebar.slider("Risk % per trade", 0.5, 5.0, 2.0) / 100
-max_mg_risk_pct = st.sidebar.slider("Max Martingale Risk %", 5.0, 30.0, 15.0) / 100
-
-# -------------------------------
 # MODEL CACHE
 # -------------------------------
 @st.cache_resource
@@ -90,6 +81,7 @@ if len(df_ml) < 50:
 # -------------------------------
 X_train, X_test, y_train, y_test = prepare_data(df_ml)
 
+# 🔒 SAFETY: ensure FEATURES exist
 missing_cols = [col for col in FEATURES if col not in df_ml.columns]
 if missing_cols:
     st.error(f"Missing features: {missing_cols}")
@@ -98,38 +90,72 @@ if missing_cols:
 model = get_model(X_train, y_train)
 
 # -------------------------------
-# OVERDUE FIXED
+# CONTEXT
+# -------------------------------
+def get_context(df):
+    last_10 = df.tail(10)["crash"]
+
+    return {
+        "volatility": last_10.std(),
+        "low_streak": int((last_10 < 2).sum()),
+        "high_streak": int((last_10 > 3).sum())
+    }
+
+ctx = get_context(df_ml)
+
+# -------------------------------
+# OVERDUE EDGE (FIXED)
 # -------------------------------
 def overdue_factor(df):
+    if len(df) < 5:
+        return 0
+
     last = df.tail(15)["crash"].to_numpy()
+    mask = last < 2
+
     streak = 0
-    for v in last[::-1]:
-        if v < 2:
+    for v in mask[::-1]:
+        if v:
             streak += 1
         else:
             break
+
     return streak
 
 overdue = overdue_factor(df_ml)
 
 # -------------------------------
-# REGIME
+# REGIME DETECTION
 # -------------------------------
 def detect_regime(df):
     last_20 = df.tail(20)["crash"]
+
+    avg = last_20.mean()
     std = last_20.std()
+
     global_std = df["crash"].rolling(100).std().mean()
 
-    if std > global_std * 1.3:
-        return "⚡ VOLATILE"
-    elif (last_20 < 2).mean() > 0.6:
-        return "🔴 CHOPPY"
-    elif (last_20 > 3).mean() > 0.4:
-        return "🟢 HOT"
-    else:
-        return "🟡 NORMAL"
+    low_ratio = (last_20 < 2).mean()
+    high_ratio = (last_20 > 3).mean()
 
-regime = detect_regime(df_ml)
+    if std > global_std * 1.3:
+        regime = "⚡ VOLATILE"
+    elif low_ratio > 0.6:
+        regime = "🔴 CHOPPY"
+    elif high_ratio > 0.4:
+        regime = "🟢 HOT"
+    else:
+        regime = "🟡 NORMAL"
+
+    return {
+        "regime": regime,
+        "avg": avg,
+        "std": std,
+        "low_ratio": low_ratio,
+        "high_ratio": high_ratio
+    }
+
+regime_data = detect_regime(df_ml)
 
 # -------------------------------
 # ML PREDICTION
@@ -140,133 +166,119 @@ X_live = last_row[FEATURES].fillna(0)
 proba = model.predict_proba(X_live)[0].max()
 confidence = proba * 100
 
+# -------------------------------
+# CONFIDENCE ADJUSTMENTS
+# -------------------------------
+if ctx["volatility"] > 1.5:
+    confidence += 5
+
+if ctx["low_streak"] >= 6:
+    confidence += 10
+
+if ctx["high_streak"] >= 5:
+    confidence -= 10
+
 if overdue >= 5:
+    confidence += 12
+
+if regime_data["regime"] == "⚡ VOLATILE":
+    confidence += 5
+elif regime_data["regime"] == "🔴 CHOPPY":
+    confidence -= 15
+elif regime_data["regime"] == "🟢 HOT":
     confidence += 10
 
 confidence = max(0, min(100, confidence))
 
 # -------------------------------
-# MULTIPLIER OPTIMIZATION
+# BACKTEST ENGINE
 # -------------------------------
-def evaluate_multiplier(df, target):
+def evaluate_multiplier(df, target, window=80):
     balance = 100
-    for i in range(len(df)-1):
-        crash = df.iloc[i+1]["crash"]
+    risk = 0.02
+
+    start = max(30, len(df) - window)
+
+    for i in range(start, len(df) - 1):
+        stake = balance * risk
+        crash = df.iloc[i + 1]["crash"]
+
         if crash >= target:
-            balance += (target - 1)
+            balance += stake * (target - 1)
         else:
-            balance -= 1
-    return balance
+            balance -= stake
+
+    return balance - 100
 
 def get_best_multiplier(df):
-    ms = np.arange(1.2, 3.0, 0.1)
-    results = [(m, evaluate_multiplier(df, m)) for m in ms]
+    multipliers = np.arange(1.2, 3.1, 0.1)
+
+    results = []
+    for m in multipliers:
+        profit = evaluate_multiplier(df, m)
+        results.append((m, profit))
+
     res = pd.DataFrame(results, columns=["m", "profit"])
-    best = res.sort_values("profit", ascending=False).iloc[0]["m"]
-    return float(best)
+    best = res.sort_values("profit", ascending=False).iloc[0]
 
-target = get_best_multiplier(df_ml)
+    return float(best["m"]), res.sort_values("profit", ascending=False)
 
-# Regime adjust
-if regime == "🔴 CHOPPY":
+target, perf_table = get_best_multiplier(df_ml)
+
+# -------------------------------
+# REGIME TARGET ADJUSTMENT
+# -------------------------------
+if regime_data["regime"] == "🔴 CHOPPY":
     target = min(target, 1.6)
-elif regime == "⚡ VOLATILE":
+elif regime_data["regime"] == "⚡ VOLATILE":
     target = max(target, 2.0)
 
 # -------------------------------
 # WIN RATE
 # -------------------------------
-def win_rate(df, target):
-    wins = ((df["crash"].shift(-1) >= target).sum())
-    total = len(df) - 1
-    return wins / total if total > 0 else 0
+def win_rate(df, target, window=80):
+    wins, total = 0, 0
+
+    start = max(30, len(df) - window)
+
+    for i in range(start, len(df) - 1):
+        crash = df.iloc[i + 1]["crash"]
+
+        if crash >= target:
+            wins += 1
+        total += 1
+
+    return wins / total if total else 0
 
 wr = win_rate(df_ml, target)
 
 # -------------------------------
-# SIGNAL
+# SIGNAL ENGINE
 # -------------------------------
-if confidence > 70 and wr > 0.55:
+if confidence > 75 and wr > 0.55:
     signal = "🔥 STRONG BET"
-elif confidence > 60 and wr > 0.5:
+elif confidence > 60 and wr > 0.50:
     signal = "✅ BET"
 elif confidence > 50:
     signal = "⚠️ SMALL BET"
+    target = min(target, 1.6)
 else:
     signal = "❌ SKIP"
     target = None
-
-# -------------------------------
-# SMART BET SIZE (KELLY LIGHT)
-# -------------------------------
-def get_base_bet(bankroll, risk_pct, confidence):
-    edge_factor = confidence / 100
-    adj_risk = risk_pct * edge_factor
-    return bankroll * adj_risk
-
-base_bet = get_base_bet(bankroll, risk_pct, confidence)
-
-# -------------------------------
-# SMART MARTINGALE (2 STEP)
-# -------------------------------
-def smart_martingale(target, base_bet, bankroll, max_risk_pct):
-    if target is None:
-        return None
-
-    step1 = base_bet
-
-    step2 = (step1 + base_bet) / (target - 1)
-
-    total_risk = step1 + step2
-    max_allowed = bankroll * max_risk_pct
-
-    # cap risk
-    if total_risk > max_allowed:
-        scale = max_allowed / total_risk
-        step1 *= scale
-        step2 *= scale
-
-    profit1 = step1 * (target - 1)
-    profit2 = step2 * (target - 1) - step1
-
-    return {
-        "step1": round(step1, 2),
-        "step2": round(step2, 2),
-        "profit1": round(profit1, 2),
-        "profit2": round(profit2, 2),
-        "total_risk": round(step1 + step2, 2)
-    }
-
-mg = smart_martingale(target, base_bet, bankroll, max_mg_risk_pct)
 
 # -------------------------------
 # DASHBOARD
 # -------------------------------
 st.markdown("## 🔥 LIVE AI DECISION")
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 
-c1.metric("Signal", signal)
-c2.metric("Confidence", f"{confidence:.1f}%")
-c3.metric("Win Rate", f"{wr:.2%}")
-c4.metric("Target", f"{target:.2f}x" if target else "No Trade")
-c5.metric("Bankroll", f"{bankroll:.2f}")
-c6.metric("Base Bet", f"{base_bet:.2f}")
-
-# -------------------------------
-# MARTINGALE UI
-# -------------------------------
-st.markdown("### 💰 Smart Martingale Plan")
-
-if mg and target:
-    m1, m2, m3, m4 = st.columns(4)
-
-    m1.metric("Step 1", mg["step1"])
-    m2.metric("Step 2", mg["step2"])
-    m3.metric("Profit", f"{mg['profit1']} / {mg['profit2']}")
-    m4.metric("Total Risk", mg["total_risk"])
-else:
-    st.info("No trade")
+col1.metric("Signal", signal)
+col2.metric("Confidence", f"{confidence:.1f}%")
+col3.metric("ML Prob", f"{proba:.2%}")
+col4.metric("🎯 Target", f"{target:.2f}x" if target else "No Trade")
+col5.metric("🧠 Regime", regime_data["regime"])
+col6.metric("Win Rate", f"{wr:.2%}")
 
 # -------------------------------
 # LAST 10 MULTIPLIERS
@@ -280,11 +292,43 @@ for i, val in enumerate(last_10):
     color = "green" if val >= 2 else "red"
 
     cols[i].markdown(
-        f"<div style='background:{color};padding:10px;border-radius:8px;text-align:center;color:white'>{val:.2f}x</div>",
+        f"""
+        <div style="
+            background-color:{color};
+            padding:10px;
+            border-radius:10px;
+            text-align:center;
+            color:white;
+            font-weight:bold;">
+            {val:.2f}x
+        </div>
+        """,
         unsafe_allow_html=True
     )
 
 # -------------------------------
-# CHART
+# INSIGHTS
 # -------------------------------
+with st.expander("🧠 AI Insights"):
+    st.write(f"Volatility: {ctx['volatility']:.2f}")
+    st.write(f"Low streak: {ctx['low_streak']}")
+    st.write(f"High streak: {ctx['high_streak']}")
+    st.write(f"Overdue: {overdue}")
+    st.write("---")
+    st.write(f"Regime avg: {regime_data['avg']:.2f}")
+    st.write(f"Regime std: {regime_data['std']:.2f}")
+
+# -------------------------------
+# PERFORMANCE TABLE
+# -------------------------------
+st.subheader("🎯 Multiplier Performance")
+st.dataframe(perf_table, use_container_width=True)
+
+# -------------------------------
+# DATA VIEW
+# -------------------------------
+st.subheader("📊 Latest Rounds")
+st.dataframe(df_ui.head(20), use_container_width=True)
+
+st.subheader("📈 Crash History")
 st.line_chart(df_ml["crash"])
