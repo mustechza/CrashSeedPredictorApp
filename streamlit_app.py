@@ -1,20 +1,84 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import time
+import os
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 from data.loader import load_data
 from data.cleaner import clean_data, FEATURES
 from training.trainer import prepare_data
 from models.random_forest import RFModel
 
+# -------------------------------
+# PAGE CONFIG
+# -------------------------------
 st.set_page_config(layout="wide")
 st.title("🚀 Crash AI v3 - Regime Adaptive Engine")
+
+# -------------------------------
+# FILE STORAGE
+# -------------------------------
+CSV_FILE = "crash_live.csv"
+
+def append_csv(row):
+    file_exists = os.path.exists(CSV_FILE)
+    row.to_csv(CSV_FILE, mode='a', header=not file_exists, index=False)
+
+# -------------------------------
+# SCRAPER
+# -------------------------------
+class CrashScraper:
+    def __init__(self):
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless")
+        options.add_argument("--disable-gpu")
+
+        self.driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=options
+        )
+
+        self.driver.get("https://bc.game/crash")
+        time.sleep(5)
+
+        self.last_value = None
+
+    def get_latest(self):
+        try:
+            elements = self.driver.find_elements(By.CSS_SELECTOR, "td.text-secondary")
+
+            if not elements:
+                return None
+
+            latest = float(elements[-1].text.strip())
+
+            if latest == self.last_value:
+                return None
+
+            self.last_value = latest
+            return latest
+
+        except Exception as e:
+            print("Scraper error:", e)
+            return None
 
 # -------------------------------
 # SESSION STATE
 # -------------------------------
 if "df" not in st.session_state:
-    st.session_state.df = None
+    if os.path.exists(CSV_FILE):
+        st.session_state.df = pd.read_csv(CSV_FILE, parse_dates=True)
+        st.success("Loaded saved dataset")
+    else:
+        st.session_state.df = None
+
+if "scraper" not in st.session_state:
+    st.session_state.scraper = CrashScraper()
 
 # -------------------------------
 # MODEL CACHE
@@ -26,21 +90,25 @@ def get_model(X, y):
     return model
 
 # -------------------------------
-# UPLOAD DATA
+# SIDEBAR
 # -------------------------------
+st.sidebar.header("Controls")
+
 file = st.sidebar.file_uploader("Upload JSON", type=["json"])
 
 if file:
     st.session_state.df = load_data(file)
     st.success("Data loaded!")
 
-# -------------------------------
-# LIVE INPUT
-# -------------------------------
-new_rate = st.sidebar.number_input("Crash Multiplier", min_value=1.0, step=0.01)
+run_live = st.sidebar.toggle("▶️ Live Auto Feed")
 
-if st.sidebar.button("Add Round"):
-    if st.session_state.df is not None:
+# -------------------------------
+# LIVE FEED
+# -------------------------------
+if run_live:
+    new_rate = st.session_state.scraper.get_latest()
+
+    if new_rate is not None:
         now = pd.Timestamp.now()
 
         row = pd.DataFrame([{
@@ -54,14 +122,27 @@ if st.sidebar.button("Add Round"):
             "fetchedAt": now
         }])
 
-        st.session_state.df = pd.concat([st.session_state.df, row], ignore_index=True)
-        st.success("Round added")
+        if st.session_state.df is None:
+            st.session_state.df = row
+        else:
+            st.session_state.df = pd.concat(
+                [st.session_state.df, row],
+                ignore_index=True
+            )
+
+        append_csv(row)
+
+        # Keep last 500 rows only
+        st.session_state.df = st.session_state.df.tail(500)
+
+    time.sleep(2)
+    st.rerun()
 
 # -------------------------------
 # CHECK DATA
 # -------------------------------
 if st.session_state.df is None:
-    st.info("Upload data to begin")
+    st.info("Waiting for live data or upload dataset")
     st.stop()
 
 # -------------------------------
@@ -73,7 +154,7 @@ df_ml = df.sort_values("fetchedAt").reset_index(drop=True)
 df_ui = df.sort_values("fetchedAt", ascending=False)
 
 if len(df_ml) < 50:
-    st.warning("Need at least 50 rounds")
+    st.warning("Collecting data... need at least 50 rounds")
     st.stop()
 
 # -------------------------------
@@ -87,7 +168,6 @@ model = get_model(X_train, y_train)
 # -------------------------------
 def get_context(df):
     last_10 = df.tail(10)["crash"]
-
     return {
         "volatility": last_10.std(),
         "low_streak": sum(last_10 < 2),
@@ -131,7 +211,6 @@ regime_data = detect_regime(df_ml)
 # -------------------------------
 last_row = df_ml.iloc[[-1]]
 X_live = last_row[FEATURES]
-
 proba = model.predict_proba(X_live)[0][1]
 
 # -------------------------------
@@ -148,7 +227,6 @@ if ctx["low_streak"] >= 6:
 if ctx["high_streak"] >= 5:
     confidence -= 15
 
-# Regime adjustment
 if regime_data["regime"] == "⚡ VOLATILE":
     confidence += 10
 elif regime_data["regime"] == "🔴 CHOPPY":
@@ -159,12 +237,11 @@ elif regime_data["regime"] == "🟢 HOT":
 confidence = max(0, min(100, confidence))
 
 # -------------------------------
-# ADAPTIVE MULTIPLIER ENGINE
+# MULTIPLIER ENGINE
 # -------------------------------
 def evaluate_multiplier(df, target, window=80):
     balance = 0
     stake = 1
-
     start = max(30, len(df) - window)
 
     for i in range(start, len(df) - 1):
@@ -199,11 +276,10 @@ def get_adaptive_multipliers(df):
         "table": res.sort_values("profit", ascending=False)
     }
 
-
 adaptive = get_adaptive_multipliers(df_ml)
 
 # -------------------------------
-# SIGNAL ENGINE (REGIME AWARE)
+# SIGNAL ENGINE
 # -------------------------------
 if confidence > 80:
     signal = "🔥 STRONG BET"
@@ -211,26 +287,18 @@ if confidence > 80:
 
 elif confidence > 60:
     signal = "✅ BET"
-
-    if regime_data["regime"] == "🟢 HOT":
-        target = adaptive["high"]
-    else:
-        target = adaptive["mid"]
+    target = adaptive["high"] if regime_data["regime"] == "🟢 HOT" else adaptive["mid"]
 
 elif confidence > 50:
     signal = "⚠️ SMALL BET"
-
-    if regime_data["regime"] == "🔴 CHOPPY":
-        target = adaptive["low"]
-    else:
-        target = adaptive["mid"]
+    target = adaptive["low"] if regime_data["regime"] == "🔴 CHOPPY" else adaptive["mid"]
 
 else:
     signal = "❌ SKIP"
     target = None
 
 # -------------------------------
-# UI - TOP DASHBOARD
+# UI
 # -------------------------------
 st.markdown("## 🔥 LIVE AI DECISION")
 
@@ -242,28 +310,13 @@ col3.metric("ML Prob", f"{proba:.2%}")
 col4.metric("🎯 Target", f"{target}x" if target else "No Trade")
 col5.metric("🧠 Regime", regime_data["regime"])
 
-# -------------------------------
-# INSIGHTS
-# -------------------------------
 with st.expander("🧠 AI + Regime Insights"):
-    st.write(f"Volatility: {ctx['volatility']:.2f}")
-    st.write(f"Low streak: {ctx['low_streak']}")
-    st.write(f"High streak: {ctx['high_streak']}")
-    st.write("---")
-    st.write(f"Regime avg: {regime_data['avg']:.2f}")
-    st.write(f"Regime std: {regime_data['std']:.2f}")
-    st.write(f"Low ratio: {regime_data['low_ratio']:.2%}")
-    st.write(f"High ratio: {regime_data['high_ratio']:.2%}")
+    st.write(ctx)
+    st.write(regime_data)
 
-# -------------------------------
-# MULTIPLIER PERFORMANCE TABLE
-# -------------------------------
 st.subheader("🎯 Adaptive Multiplier Performance")
 st.dataframe(adaptive["table"], use_container_width=True)
 
-# -------------------------------
-# DATA VIEW
-# -------------------------------
 st.subheader("📊 Latest Rounds")
 st.dataframe(df_ui.head(20), use_container_width=True)
 
