@@ -2,4 +2,8 @@ streamlit
 pandas
 numpy
 scikit-learn
-playwright
+tensorflow
+keras
+matplotlib
+plotly
+mplfinance
