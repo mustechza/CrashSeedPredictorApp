@@ -243,6 +243,9 @@ col4.metric("🎯 Target", f"{target}x" if target else "No Trade")
 col5.metric("🧠 Regime", regime_data["regime"])
 
 # -------------------------------
+
+
+
 # LAST 10 MULTIPLIERS
 # -------------------------------
 st.markdown("### 📉 Last 10 Multipliers")
