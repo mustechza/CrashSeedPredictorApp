@@ -16,7 +16,7 @@ st.title("🚀 Crash AI v3 - Regime Adaptive Engine")
 # -------------------------------
 # CONFIG
 # -------------------------------
-WATCH_FOLDER = r"C:\Users\Downloads"  # <-- CHANGE THIS
+WATCH_FOLDER = r"C:\Downloads"  # <-- CHANGE THIS
 # -------------------------------
 # SESSION STATE
 # -------------------------------
