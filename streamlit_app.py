@@ -2,12 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
-import joblib
 import hashlib
-import json
 from datetime import datetime, timedelta
-from pathlib import Path
-from sklearn.model_selection import cross_val_score
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -62,11 +58,9 @@ def init_session_state():
         "predictions_log": [],
         "auto_learn": True,
         "last_data_hash": None,
-        "model_version": 0,
         "total_predictions": 0,
         "correct_predictions": 0,
-        "performance_metrics": [],
-        "last_save_time": None
+        "performance_metrics": []
     }
     
     for key, value in defaults.items():
@@ -74,66 +68,6 @@ def init_session_state():
             st.session_state[key] = value
 
 init_session_state()
-
-# -------------------------------
-# PERSISTENCE FUNCTIONS
-# -------------------------------
-def save_model_state():
-    """Save model and data to disk for persistence"""
-    if st.session_state.model and st.session_state.df is not None:
-        try:
-            # Create models directory if it doesn't exist
-            Path("saved_models").mkdir(exist_ok=True)
-            
-            # Save model
-            model_path = f"saved_models/crash_ai_v{st.session_state.model_version}.pkl"
-            joblib.dump(st.session_state.model, model_path)
-            
-            # Save data
-            data_path = f"saved_models/data_v{st.session_state.model_version}.csv"
-            st.session_state.df.to_csv(data_path, index=False)
-            
-            # Save metadata
-            metadata = {
-                "version": st.session_state.model_version,
-                "timestamp": datetime.now().isoformat(),
-                "rounds": len(st.session_state.df),
-                "accuracy": st.session_state.training_history[-1]["accuracy"] if st.session_state.training_history else 0
-            }
-            with open("saved_models/metadata.json", "w") as f:
-                json.dump(metadata, f)
-            
-            st.session_state.last_save_time = datetime.now()
-            return True
-        except Exception as e:
-            st.error(f"Failed to save model: {str(e)}")
-            return False
-    return False
-
-def load_saved_model():
-    """Load previously saved model if available"""
-    try:
-        metadata_path = Path("saved_models/metadata.json")
-        if metadata_path.exists():
-            with open(metadata_path, "r") as f:
-                metadata = json.load(f)
-            
-            model_path = f"saved_models/crash_ai_v{metadata['version']}.pkl"
-            data_path = f"saved_models/data_v{metadata['version']}.csv"
-            
-            if Path(model_path).exists() and Path(data_path).exists():
-                model = joblib.load(model_path)
-                df = pd.read_csv(data_path)
-                
-                st.session_state.model = model
-                st.session_state.df = df
-                st.session_state.model_version = metadata['version']
-                
-                st.success(f"✅ Loaded saved model v{metadata['version']} with {len(df)} rounds")
-                return True
-    except Exception as e:
-        st.warning(f"Could not load saved model: {str(e)}")
-    return False
 
 # -------------------------------
 # IMPROVED MODEL TRAINING
@@ -156,6 +90,8 @@ def train_or_retrain_model(df, force=False):
     if needs_retraining:
         with st.spinner("🔄 Training AI with latest data..."):
             try:
+                from sklearn.model_selection import cross_val_score
+                
                 X_train, X_test, y_train, y_test = prepare_data(df)
                 model = RFModel()
                 model.train(X_train, y_train)
@@ -177,10 +113,6 @@ def train_or_retrain_model(df, force=False):
                 st.session_state.model = model
                 st.session_state.last_training_time = datetime.now()
                 st.session_state.rounds_since_training = 0
-                st.session_state.model_version += 1
-                
-                # Auto-save after training
-                save_model_state()
                 
                 return model
             except Exception as e:
@@ -551,15 +483,8 @@ if add_button and st.session_state.df is not None:
 # -------------------------------
 # BATCH UPLOAD FOR HISTORICAL DATA
 # -------------------------------
-st.sidebar.markdown("## 📁 Data Management")
-
-col_load, col_save = st.sidebar.columns(2)
-with col_load:
-    file = st.file_uploader("Load JSON", type=["json"], key="file_uploader")
-with col_save:
-    if st.button("💾 Save Current State", use_container_width=True):
-        if save_model_state():
-            st.sidebar.success("State saved successfully!")
+st.sidebar.markdown("## 📁 Historical Data")
+file = st.sidebar.file_uploader("Upload JSON (once)", type=["json"], key="file_uploader")
 
 if file and st.session_state.df is None:
     with st.spinner("Loading historical data..."):
@@ -567,10 +492,8 @@ if file and st.session_state.df is None:
             st.session_state.df = load_data(file)
             st.success(f"✅ Loaded {len(st.session_state.df)} historical rounds!")
             
-            # Try to load saved model first
-            if not load_saved_model():
-                # Initial training
-                train_or_retrain_model(st.session_state.df, force=True)
+            # Initial training
+            train_or_retrain_model(st.session_state.df, force=True)
             st.rerun()
         except Exception as e:
             st.error(f"Error loading file: {str(e)}")
@@ -624,19 +547,14 @@ with st.sidebar.expander("📊 Batch Add Multiple Rounds"):
 if st.session_state.df is not None and st.session_state.model is not None:
     st.sidebar.markdown("## 📈 Model Status")
     
-    col1, col2, col3 = st.sidebar.columns(3)
+    col1, col2 = st.sidebar.columns(2)
     with col1:
         st.metric("Total Rounds", len(st.session_state.df))
     with col2:
         st.metric("Rounds since training", st.session_state.rounds_since_training)
-    with col3:
-        st.metric("Model Version", st.session_state.model_version)
     
     if st.session_state.last_training_time:
         st.sidebar.caption(f"Last trained: {st.session_state.last_training_time.strftime('%H:%M:%S')}")
-    
-    if st.session_state.last_save_time:
-        st.sidebar.caption(f"Last saved: {st.session_state.last_save_time.strftime('%H:%M:%S')}")
     
     col_retrain, col_reset = st.sidebar.columns(2)
     with col_retrain:
@@ -662,13 +580,8 @@ if st.session_state.df is not None and st.session_state.model is not None:
 # MAIN APPLICATION
 # -------------------------------
 if st.session_state.df is None:
-    st.info("📤 Upload your JSON file or load a saved model to begin. The AI will learn from every round you add!")
-    
-    # Try to load saved model automatically
-    load_saved_model()
-    
-    if st.session_state.df is None:
-        st.stop()
+    st.info("📤 Upload your JSON file to begin. The AI will learn from every round you add!")
+    st.stop()
 
 # -------------------------------
 # CLEAN DATA
@@ -773,7 +686,6 @@ if confidence > 80:
     signal = "🔥 STRONG BET"
     target = adaptive["high"]
     bet_size = "Large (5-10%)"
-    risk_color = "strong"
 elif confidence > 65:
     signal = "✅ BET"
     if regime_data["regime"] in ["🟢 HOT", "🟢 WARM"]:
@@ -984,19 +896,12 @@ chart_data = df_ml[["crash"]].tail(200)
 st.line_chart(chart_data)
 
 # -------------------------------
-# EXPORT FUNCTIONALITY
+# EXPORT FUNCTIONALITY (DOWNLOAD ONLY, NO PERSISTENCE)
 # -------------------------------
 st.subheader("💾 Export Options")
-col_exp1, col_exp2, col_exp3 = st.columns(3)
+col_exp1, col_exp2 = st.columns(2)
 
 with col_exp1:
-    if st.button("💾 Export Model", use_container_width=True):
-        if save_model_state():
-            st.success("Model saved successfully!")
-        else:
-            st.error("Failed to save model")
-
-with col_exp2:
     if st.button("📥 Export Data", use_container_width=True):
         csv = st.session_state.df.to_csv(index=False)
         st.download_button(
@@ -1006,7 +911,7 @@ with col_exp2:
             key="data_download"
         )
 
-with col_exp3:
+with col_exp2:
     if st.button("📊 Export Predictions", use_container_width=True):
         if st.session_state.predictions_log:
             log_df = pd.DataFrame(st.session_state.predictions_log)
