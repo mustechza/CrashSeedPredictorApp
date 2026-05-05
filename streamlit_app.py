@@ -136,7 +136,7 @@ if add_button and st.session_state.df is not None:
                 (last_pred["prediction"] == "⚠️ SMALL BET" and new_rate >= last_pred["target"]) or
                 (last_pred["prediction"] == "❌ SKIP")
             )
-            st.sideend insight
+            st.side
     
     st.rerun()
 
