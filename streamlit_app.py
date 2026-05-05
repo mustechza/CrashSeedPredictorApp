@@ -2,18 +2,57 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
+import plotly.graph_objects as go
+import plotly.express as px
 from datetime import datetime, timedelta
+from collections import deque
+import hashlib
+import json
+from pathlib import Path
 
 from data.loader import load_data
 from data.cleaner import clean_data, FEATURES
 from training.trainer import prepare_data
 from models.random_forest import RFModel
 
-st.set_page_config(layout="wide")
-st.title("🚀 Crash AI v3 - Regime Adaptive Engine with Continuous Learning")
+# Page config
+st.set_page_config(
+    layout="wide",
+    page_title="Crash AI v4 - Advanced Learning Engine",
+    page_icon="🚀",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better UI
+st.markdown("""
+<style>
+    .big-metric {
+        font-size: 2.5rem;
+        font-weight: bold;
+    }
+    .signal-strong {
+        background: linear-gradient(90deg, #ff6b6b, #ff8e53);
+        padding: 1rem;
+        border-radius: 10px;
+        text-align: center;
+        animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.7; }
+        100% { opacity: 1; }
+    }
+    .insight-box {
+        background-color: #1e1e1e;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 4px solid #ff6b6b;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # -------------------------------
-# SESSION STATE
+# ENHANCED SESSION STATE
 # -------------------------------
 if "df" not in st.session_state:
     st.session_state.df = None
@@ -29,49 +68,149 @@ if "predictions_log" not in st.session_state:
     st.session_state.predictions_log = []
 if "auto_learn" not in st.session_state:
     st.session_state.auto_learn = True
+if "performance_metrics" not in st.session_state:
+    st.session_state.performance_metrics = {
+        "total_profit": 0,
+        "total_trades": 0,
+        "winning_trades": 0,
+        "max_drawdown": 0,
+        "peak_balance": 1000,
+        "current_balance": 1000,
+        "trade_history": []
+    }
+if "alert_config" not in st.session_state:
+    st.session_state.alert_config = {
+        "confidence_threshold": 80,
+        "profit_target": 20,
+        "stop_loss": 10
+    }
+if "feature_importance_history" not in st.session_state:
+    st.session_state.feature_importance_history = []
+if "regime_transitions" not in st.session_state:
+    st.session_state.regime_transitions = []
+if "backtest_results" not in st.session_state:
+    st.session_state.backtest_results = None
 
 # -------------------------------
-# MODEL MANAGEMENT WITH CONTINUOUS LEARNING
+# IMPROVED MODEL MANAGEMENT
 # -------------------------------
+class ModelVersioning:
+    """Handle model versioning and rollback"""
+    
+    def __init__(self, save_dir="models"):
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(exist_ok=True)
+    
+    def save_model(self, model, version=None):
+        if version is None:
+            version = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        import joblib
+        path = self.save_dir / f"crash_model_v{version}.pkl"
+        joblib.dump(model, path)
+        
+        # Save metadata
+        metadata = {
+            "version": version,
+            "timestamp": datetime.now().isoformat(),
+            "accuracy": st.session_state.training_history[-1]["accuracy"] if st.session_state.training_history else 0,
+            "rounds": len(st.session_state.df) if st.session_state.df is not None else 0
+        }
+        with open(self.save_dir / f"metadata_v{version}.json", "w") as f:
+            json.dump(metadata, f)
+        
+        return version
+    
+    def load_latest_model(self):
+        models = list(self.save_dir.glob("crash_model_*.pkl"))
+        if not models:
+            return None
+        
+        latest = max(models, key=lambda x: x.stat().st_mtime)
+        import joblib
+        return joblib.load(latest)
+
+model_versioning = ModelVersioning()
+
 def train_or_retrain_model(df, force=False):
-    """Train or retrain model with current data"""
+    """Train or retrain model with enhanced tracking"""
     min_rounds = 50
-    retrain_threshold = 10  # Retrain every 10 new rounds
+    retrain_threshold = 10
     
     if len(df) < min_rounds:
         st.warning(f"Need at least {min_rounds} rounds. Currently: {len(df)}")
         return None
     
-    # Check if retraining is needed
+    # Dynamic retraining based on performance degradation
     needs_retraining = (
         st.session_state.model is None or
         force or
         st.session_state.rounds_since_training >= retrain_threshold
     )
     
+    # Check if model performance degraded
+    if st.session_state.predictions_log and len(st.session_state.predictions_log) >= 20:
+        recent_correct = [p for p in st.session_state.predictions_log[-20:] if p["was_correct"] is not None]
+        if recent_correct:
+            recent_accuracy = sum(p["was_correct"] for p in recent_correct) / len(recent_correct)
+            if recent_accuracy < 0.4:  # Below 40% accuracy
+                needs_retraining = True
+                st.info("⚠️ Performance degradation detected - retraining required")
+    
     if needs_retraining:
-        with st.spinner("🔄 Training AI with latest data..."):
+        with st.spinner("🔄 Advanced training in progress..."):
             try:
+                # Prepare data with validation split
                 X_train, X_test, y_train, y_test = prepare_data(df)
-                model = RFModel()
-                model.train(X_train, y_train)
                 
-                # Calculate accuracy on test set
-                accuracy = model.model.score(X_test, y_test)
+                # Hyperparameter tuning
+                from sklearn.model_selection import GridSearchCV
+                param_grid = {
+                    'n_estimators': [100, 200],
+                    'max_depth': [10, 20, None],
+                    'min_samples_split': [2, 5, 10]
+                }
+                
+                base_model = RFModel()
+                grid_search = GridSearchCV(
+                    base_model.model, 
+                    param_grid, 
+                    cv=5, 
+                    scoring='roc_auc',
+                    n_jobs=-1
+                )
+                grid_search.fit(X_train, y_train)
+                
+                # Use best model
+                base_model.model = grid_search.best_estimator_
+                accuracy = base_model.model.score(X_test, y_test)
+                
+                # Store feature importance
+                importance_dict = dict(zip(FEATURES, base_model.model.feature_importances_))
+                st.session_state.feature_importance_history.append({
+                    "timestamp": datetime.now(),
+                    "importance": importance_dict
+                })
                 
                 # Log training event
                 st.session_state.training_history.append({
                     "timestamp": datetime.now(),
                     "rounds": len(df),
                     "accuracy": accuracy,
-                    "new_rounds_since_last": st.session_state.rounds_since_training
+                    "new_rounds_since_last": st.session_state.rounds_since_training,
+                    "best_params": grid_search.best_params_,
+                    "feature_importance": importance_dict
                 })
                 
-                st.session_state.model = model
+                st.session_state.model = base_model
                 st.session_state.last_training_time = datetime.now()
                 st.session_state.rounds_since_training = 0
                 
-                return model
+                # Save model version
+                version = model_versioning.save_model(base_model)
+                st.success(f"✅ Model trained! Accuracy: {accuracy:.2%} (Version: {version})")
+                
+                return base_model
             except Exception as e:
                 st.error(f"Training failed: {str(e)}")
                 return None
@@ -79,555 +218,718 @@ def train_or_retrain_model(df, force=False):
     return st.session_state.model
 
 # -------------------------------
-# LIVE INPUT WITH AUTO-LEARNING
+# ENHANCED RISK MANAGEMENT
 # -------------------------------
-st.sidebar.markdown("## 🎮 Add New Round")
-st.sidebar.markdown("Each new round helps the AI learn and improve!")
-
-new_rate = st.sidebar.number_input("Crash Multiplier", min_value=1.0, step=0.01, key="live_multiplier")
-
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    add_button = st.button("➕ Add Round", use_container_width=True)
-with col2:
-    st.session_state.auto_learn = st.checkbox("🤖 Auto-learn", value=st.session_state.auto_learn, help="Automatically retrain AI after every 10 rounds")
-
-if add_button and st.session_state.df is not None:
-    now = pd.Timestamp.now()
+class RiskManager:
+    """Advanced risk management system"""
     
-    row = pd.DataFrame([{
-        "rate": str(new_rate),
-        "crash": float(new_rate),
-        "prepareTime": now,
-        "beginTime": now,
-        "endTime": now,
-        "hash": f"live_{now.timestamp()}",
-        "salt": "live",
-        "fetchedAt": now
-    }])
+    def __init__(self, balance, max_risk_per_trade=0.05):
+        self.balance = balance
+        self.max_risk_per_trade = max_risk_per_trade
+        self.consecutive_losses = 0
+        self.position_sizing_mode = "kelly"  # kelly, fixed, progressive
     
-    # Add to dataset
-    st.session_state.df = pd.concat([st.session_state.df, row], ignore_index=True)
-    st.session_state.rounds_since_training += 1
-    
-    # Show immediate feedback
-    st.sidebar.success(f"✅ Round added! New round: {new_rate}x")
-    
-    # Auto-learn if enabled
-    if st.session_state.auto_learn and st.session_state.rounds_since_training >= 10:
-        st.sidebar.info("🔄 Auto-learning triggered...")
-        train_or_retrain_model(st.session_state.df, force=True)
-    
-    # Log prediction accuracy if we had a prediction
-    if st.session_state.predictions_log:
-        last_pred = st.session_state.predictions_log[-1]
-        if last_pred["actual"] is None:
-            last_pred["actual"] = new_rate
-            # Determine if prediction was correct
-            if last_pred["signal"] == "❌ SKIP":
-                # Skip is always "correct" as it avoids loss
-                last_pred["was_correct"] = True
-            else:
-                # For bet signals, check if crash reached target
-                last_pred["was_correct"] = new_rate >= (last_pred["target"] or 0)
-    
-    st.rerun()
-
-# -------------------------------
-# BATCH UPLOAD FOR HISTORICAL DATA
-# -------------------------------
-st.sidebar.markdown("## 📁 Historical Data")
-file = st.sidebar.file_uploader("Upload JSON (once)", type=["json"])
-
-if file and st.session_state.df is None:
-    with st.spinner("Loading historical data..."):
-        try:
-            st.session_state.df = load_data(file)
-            st.success(f"✅ Loaded {len(st.session_state.df)} historical rounds!")
+    def calculate_position_size(self, confidence, target, probability, kelly_factor=0.25):
+        """Calculate optimal position size based on multiple factors"""
+        
+        # Base position size using Kelly Criterion
+        if target and target > 1:
+            implied_prob = 1 / target
+            edge = probability - implied_prob
             
-            # Initial training
-            train_or_retrain_model(st.session_state.df, force=True)
-            st.rerun()
-        except Exception as e:
-            st.error(f"Error loading file: {str(e)}")
-
-# -------------------------------
-# BULK ADD MULTIPLE ROUNDS
-# -------------------------------
-with st.sidebar.expander("📊 Batch Add Multiple Rounds"):
-    st.markdown("Add multiple rounds at once (comma-separated)")
-    batch_multipliers = st.text_input("Multipliers (e.g., 1.5, 2.3, 1.2, 4.5)")
+            if edge > 0:
+                kelly_size = edge / (1 - implied_prob)
+                kelly_size = min(kelly_size, self.max_risk_per_trade)
+                position_size = kelly_size * kelly_factor
+            else:
+                position_size = 0
+        else:
+            position_size = 0
+        
+        # Adjust for confidence
+        confidence_multiplier = confidence / 100
+        position_size *= confidence_multiplier
+        
+        # Adjust for consecutive losses (anti-martingale)
+        if self.consecutive_losses > 2:
+            position_size *= 0.5
+        
+        # Max drawdown protection
+        if self.balance < 500:  # 50% drawdown from 1000
+            position_size *= 0.25
+        
+        return min(position_size, self.max_risk_per_trade)
     
-    if st.button("Add Batch") and st.session_state.df is not None:
-        if batch_multipliers:
-            try:
-                multipliers = [float(x.strip()) for x in batch_multipliers.split(",")]
-                now = pd.Timestamp.now()
-                
-                new_rows = []
-                for i, m in enumerate(multipliers):
-                    new_rows.append({
-                        "rate": str(m),
-                        "crash": m,
-                        "prepareTime": now + timedelta(seconds=i),
-                        "beginTime": now + timedelta(seconds=i),
-                        "endTime": now + timedelta(seconds=i+5),
-                        "hash": f"batch_{now.timestamp()}_{i}",
-                        "salt": "batch",
-                        "fetchedAt": now + timedelta(seconds=i)
-                    })
-                
-                batch_df = pd.DataFrame(new_rows)
-                st.session_state.df = pd.concat([st.session_state.df, batch_df], ignore_index=True)
-                st.session_state.rounds_since_training += len(multipliers)
-                
-                st.sidebar.success(f"✅ Added {len(multipliers)} rounds!")
-                
-                if st.session_state.auto_learn and st.session_state.rounds_since_training >= 10:
-                    train_or_retrain_model(st.session_state.df, force=True)
-                
-                st.rerun()
-            except Exception as e:
-                st.sidebar.error(f"Error adding batch: {str(e)}")
+    def update_after_trade(self, won, profit_loss):
+        """Update risk metrics after trade"""
+        self.balance += profit_loss
+        
+        if won:
+            self.consecutive_losses = 0
+        else:
+            self.consecutive_losses += 1
+
+risk_manager = RiskManager(1000)
 
 # -------------------------------
-# MODEL PERFORMANCE DASHBOARD
+# IMPROVED CONTEXT FEATURES
 # -------------------------------
-if st.session_state.df is not None and st.session_state.model is not None:
-    st.sidebar.markdown("## 📈 Model Status")
-    
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        st.metric("Total Rounds", len(st.session_state.df))
-    with col2:
-        st.metric("Rounds since training", st.session_state.rounds_since_training)
-    
-    if st.session_state.last_training_time:
-        st.sidebar.caption(f"Last trained: {st.session_state.last_training_time.strftime('%H:%M:%S')}")
-    
-    if st.sidebar.button("🔄 Force Retrain Now"):
-        train_or_retrain_model(st.session_state.df, force=True)
-        st.sidebar.success("Model retrained!")
-        st.rerun()
-    
-    # Training history
-    if st.session_state.training_history:
-        with st.sidebar.expander("📊 Training History"):
-            history_df = pd.DataFrame(st.session_state.training_history)
-            st.line_chart(history_df.set_index("timestamp")["accuracy"])
-
-# -------------------------------
-# CHECK DATA
-# -------------------------------
-if st.session_state.df is None:
-    st.info("📤 Upload your JSON file to begin. The AI will learn from every round you add!")
-    st.stop()
-
-# -------------------------------
-# CLEAN DATA
-# -------------------------------
-try:
-    df = clean_data(st.session_state.df)
-    df_ml = df.sort_values("fetchedAt").reset_index(drop=True)
-    df_ui = df.sort_values("fetchedAt", ascending=False)
-except Exception as e:
-    st.error(f"Error cleaning data: {str(e)}")
-    st.stop()
-
-if len(df_ml) < 50:
-    st.warning(f"Need at least 50 rounds for AI training. Currently: {len(df_ml)}")
-    st.info("📝 Add more rounds using the sidebar to help the AI learn!")
-    st.stop()
-
-# -------------------------------
-# TRAIN/GET MODEL
-# -------------------------------
-model = train_or_retrain_model(df_ml)
-
-if model is None:
-    st.error("Model training failed. Please add more data.")
-    st.stop()
-
-# -------------------------------
-# CONTEXT FEATURES
-# -------------------------------
-def get_context(df):
+def get_enhanced_context(df):
+    """Extract enhanced context features with market microstructure"""
     last_10 = df.tail(10)["crash"]
+    last_20 = df.tail(20)["crash"]
     last_50 = df.tail(50)["crash"]
+    
+    # Volatility clustering detection
+    volatility_cluster = last_10.std() / last_50.std() if last_50.std() > 0 else 1
+    
+    # Pattern recognition
+    def detect_pattern(series):
+        """Simple pattern detection"""
+        increasing = sum(series.diff() > 0) > len(series) * 0.6
+        decreasing = sum(series.diff() < 0) > len(series) * 0.6
+        if increasing:
+            return "uptrend"
+        elif decreasing:
+            return "downtrend"
+        else:
+            return "ranging"
+    
+    pattern = detect_pattern(last_20)
+    
+    # Momentum indicators
+    momentum = (last_10.mean() - last_50.mean()) / last_50.mean() if last_50.mean() > 0 else 0
     
     return {
         "volatility": last_10.std(),
+        "volatility_cluster": volatility_cluster,
         "low_streak": sum(last_10 < 2),
         "high_streak": sum(last_10 > 3),
         "trend": "up" if last_50.mean() < last_10.mean() else "down",
         "avg_10": last_10.mean(),
-        "avg_50": last_50.mean()
+        "avg_50": last_50.mean(),
+        "pattern": pattern,
+        "momentum": momentum,
+        "max_10": last_10.max(),
+        "min_10": last_10.min(),
+        "range_10": last_10.max() - last_10.min()
     }
 
-ctx = get_context(df_ml)
-
 # -------------------------------
-# REGIME DETECTION (ENHANCED)
+# ENHANCED REGIME DETECTION
 # -------------------------------
-def detect_regime(df):
+def detect_enhanced_regime(df):
+    """Multi-factor regime detection with transition tracking"""
     last_20 = df.tail(20)["crash"]
     last_50 = df.tail(50)["crash"]
+    last_100 = df.tail(100)["crash"]
     
     avg = last_20.mean()
     std = last_20.std()
     low_ratio = (last_20 < 2).mean()
     high_ratio = (last_20 > 3).mean()
     
-    # Detect regime shifts
-    trend_shift = abs(last_50.mean() - avg) / max(last_50.std(), 0.1)
+    # Advanced metrics
+    skewness = last_20.skew()
+    kurtosis = last_20.kurtosis()
     
-    if std > 2.5:
+    # Detect regime shifts
+    prev_regime_avg = last_50.head(20).mean()
+    regime_shift = abs(avg - prev_regime_avg) / max(last_50.std(), 0.1)
+    
+    # Multi-factor regime classification
+    scores = {
+        "volatile": std > 2.0,
+        "choppy": low_ratio > 0.5,
+        "hot": high_ratio > 0.3,
+        "trending": abs(regime_shift) > 0.5
+    }
+    
+    if scores["volatile"]:
         regime = "⚡ VOLATILE"
         confidence_boost = 10
-    elif low_ratio > 0.6:
+        color = "#ff6b6b"
+    elif scores["choppy"]:
         regime = "🔴 CHOPPY"
         confidence_boost = -20
-    elif high_ratio > 0.4:
+        color = "#ffa500"
+    elif scores["hot"]:
         regime = "🟢 HOT"
         confidence_boost = 15
+        color = "#4ecdc4"
+    elif scores["trending"]:
+        regime = "📈 TRENDING"
+        confidence_boost = 5
+        color = "#45b7d1"
     else:
         regime = "🟡 NORMAL"
         confidence_boost = 0
+        color = "#f9ca24"
     
-    # Adjust for trend shifts
-    if trend_shift > 1.5:
-        regime += " (Trend Shift!)"
-        confidence_boost += 5
+    # Track regime transitions
+    if st.session_state.regime_transitions and st.session_state.regime_transitions[-1]["regime"] != regime:
+        st.session_state.regime_transitions.append({
+            "timestamp": datetime.now(),
+            "from_regime": st.session_state.regime_transitions[-1]["regime"],
+            "to_regime": regime,
+            "confidence": confidence_boost
+        })
+    elif not st.session_state.regime_transitions:
+        st.session_state.regime_transitions.append({
+            "timestamp": datetime.now(),
+            "from_regime": None,
+            "to_regime": regime,
+            "confidence": confidence_boost
+        })
     
     return {
         "regime": regime,
+        "color": color,
         "avg": avg,
         "std": std,
         "low_ratio": low_ratio,
         "high_ratio": high_ratio,
         "confidence_boost": confidence_boost,
-        "trend_shift": trend_shift
+        "regime_shift": regime_shift,
+        "skewness": skewness,
+        "kurtosis": kurtosis,
+        "scores": scores
     }
 
-regime_data = detect_regime(df_ml)
-
 # -------------------------------
-# ML PREDICTION WITH CONFIDENCE INTERVAL
+# ADVANCED BACKTESTING ENGINE
 # -------------------------------
-last_row = df_ml.iloc[[-1]]
-X_live = last_row[FEATURES]
-
-# Get prediction probability
-try:
-    proba = model.predict_proba(X_live)[0][1]
-except Exception as e:
-    st.warning(f"Prediction error: {str(e)}")
-    proba = 0.5
-
-# Get feature importance for explanation
-try:
-    feature_importance = dict(zip(FEATURES, model.model.feature_importances_))
-    top_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:3]
-except:
-    top_features = [("feature1", 0), ("feature2", 0), ("feature3", 0)]
-
-# -------------------------------
-# CONFIDENCE ENGINE (ENHANCED)
-# -------------------------------
-confidence = proba * 50
-
-if ctx["volatility"] > 1.5:
-    confidence += 15
-elif ctx["volatility"] > 2.5:
-    confidence += 25
-
-if ctx["low_streak"] >= 6:
-    confidence += 20
-elif ctx["low_streak"] >= 4:
-    confidence += 10
-
-if ctx["high_streak"] >= 5:
-    confidence -= 15
-
-# Regime adjustment
-confidence += regime_data["confidence_boost"]
-
-# Learning progress boost - model gets more confident with more data
-learning_progress = min(len(df_ml) / 500, 0.2)  # Up to 20% boost at 500 rounds
-confidence *= (1 + learning_progress)
-
-confidence = max(0, min(100, confidence))
-
-# -------------------------------
-# ADAPTIVE MULTIPLIER ENGINE (ENHANCED)
-# -------------------------------
-def evaluate_multiplier(df, target, window=100):
-    """Enhanced evaluation with risk-adjusted returns"""
-    balance = 0
-    stake = 1
-    wins = 0
-    total_trades = 0
-    returns = []
+def run_advanced_backtest(df, initial_balance=1000):
+    """Run comprehensive backtest with multiple strategies"""
+    results = {}
     
-    start = max(30, len(df) - window)
+    # Strategy 1: Current AI strategy
+    balance_ai = initial_balance
+    trades_ai = []
     
-    for i in range(start, len(df) - 1):
-        crash = df.iloc[i + 1]["crash"]
+    # Strategy 2: Conservative (always low multiplier)
+    balance_conservative = initial_balance
+    trades_conservative = []
+    
+    # Strategy 3: Aggressive (always high multiplier)
+    balance_aggressive = initial_balance
+    trades_aggressive = []
+    
+    for i in range(50, len(df) - 1):
+        # Simulate AI strategy (simplified)
+        last_20 = df.iloc[i-20:i]["crash"]
+        volatility = last_20.std()
         
-        if crash >= target:
-            profit = stake * (target - 1)
-            balance += profit
-            wins += 1
-            returns.append(profit)
+        # AI decision logic
+        if volatility > 2.0:
+            target = 1.8
+        elif volatility < 1.0:
+            target = 3.0
         else:
-            balance -= stake
-            returns.append(-stake)
+            target = 2.2
         
-        total_trades += 1
+        actual = df.iloc[i+1]["crash"]
+        
+        # AI trade
+        if actual >= target:
+            profit_ai = 1 * (target - 1)
+            balance_ai += profit_ai
+            trades_ai.append(profit_ai)
+        else:
+            balance_ai -= 1
+            trades_ai.append(-1)
+        
+        # Conservative strategy
+        if actual >= 1.5:
+            balance_conservative += 0.5
+            trades_conservative.append(0.5)
+        else:
+            balance_conservative -= 1
+            trades_conservative.append(-1)
+        
+        # Aggressive strategy
+        if actual >= 5.0:
+            balance_aggressive += 4
+            trades_aggressive.append(4)
+        else:
+            balance_aggressive -= 1
+            trades_aggressive.append(-1)
     
-    win_rate = wins / total_trades if total_trades > 0 else 0
-    sharpe = np.mean(returns) / np.std(returns) if len(returns) > 1 and np.std(returns) > 0 else 0
-    
-    return balance, win_rate, sharpe
-
-def get_adaptive_multipliers(df):
-    multipliers = [1.3, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0, 3.5, 4.0, 5.0]
-    
-    results = []
-    for m in multipliers:
-        profit, win_rate, sharpe = evaluate_multiplier(df, m)
-        results.append({
-            "m": m, 
-            "profit": profit, 
-            "win_rate": win_rate,
-            "sharpe": sharpe,
-            "score": profit * win_rate * (1 + sharpe) if profit > 0 else profit * win_rate
-        })
-    
-    res = pd.DataFrame(results)
-    
-    if len(res) == 0:
-        return {
-            "low": 1.5,
-            "mid": 2.0,
-            "high": 3.0,
-            "table": pd.DataFrame()
+    # Calculate metrics
+    for name, balance, trades in [
+        ("AI Strategy", balance_ai, trades_ai),
+        ("Conservative", balance_conservative, trades_conservative),
+        ("Aggressive", balance_aggressive, trades_aggressive)
+    ]:
+        returns = pd.Series(trades)
+        
+        results[name] = {
+            "final_balance": balance,
+            "total_return": balance - initial_balance,
+            "return_pct": ((balance - initial_balance) / initial_balance) * 100,
+            "win_rate": (returns > 0).mean(),
+            "sharpe_ratio": returns.mean() / returns.std() if returns.std() > 0 else 0,
+            "max_drawdown": (returns.cumsum().min()),
+            "total_trades": len(trades)
         }
     
-    # Categorize by risk
-    low_risk = res[res["m"] <= 1.8]
-    medium_risk = res[(res["m"] > 1.8) & (res["m"] <= 2.5)]
-    high_risk = res[res["m"] > 2.5]
-    
-    return {
-        "low": low_risk.sort_values("score", ascending=False).iloc[0]["m"] if len(low_risk) > 0 else 1.5,
-        "mid": medium_risk.sort_values("score", ascending=False).iloc[0]["m"] if len(medium_risk) > 0 else 2.0,
-        "high": high_risk.sort_values("score", ascending=False).iloc[0]["m"] if len(high_risk) > 0 else 3.0,
-        "table": res.sort_values("score", ascending=False)
-    }
+    return pd.DataFrame(results).T
 
+# -------------------------------
+# REAL-TIME PERFORMANCE TRACKING
+# -------------------------------
+def update_performance_metrics(actual_multiplier, target, was_bet):
+    """Update live performance metrics"""
+    metrics = st.session_state.performance_metrics
+    
+    if was_bet and target:
+        if actual_multiplier >= target:
+            profit = 1 * (target - 1)
+            metrics["winning_trades"] += 1
+        else:
+            profit = -1
+        
+        metrics["total_profit"] += profit
+        metrics["current_balance"] += profit
+        metrics["total_trades"] += 1
+        
+        # Update peak balance and drawdown
+        if metrics["current_balance"] > metrics["peak_balance"]:
+            metrics["peak_balance"] = metrics["current_balance"]
+        
+        drawdown = (metrics["peak_balance"] - metrics["current_balance"]) / metrics["peak_balance"]
+        if drawdown > metrics["max_drawdown"]:
+            metrics["max_drawdown"] = drawdown
+        
+        # Store trade
+        metrics["trade_history"].append({
+            "timestamp": datetime.now(),
+            "multiplier": actual_multiplier,
+            "target": target,
+            "profit": profit,
+            "won": profit > 0
+        })
+        
+        # Keep last 1000 trades
+        if len(metrics["trade_history"]) > 1000:
+            metrics["trade_history"] = metrics["trade_history"][-1000:]
+
+# -------------------------------
+# UI COMPONENTS
+# -------------------------------
+def create_gauge_chart(value, title, max_value=100):
+    """Create a gauge chart using plotly"""
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        title={"text": title},
+        gauge={
+            "axis": {"range": [0, max_value]},
+            "bar": {"color": "#ff6b6b"},
+            "steps": [
+                {"range": [0, 33], "color": "#ff4444"},
+                {"range": [33, 66], "color": "#ffa500"},
+                {"range": [66, 100], "color": "#00ff00"}
+            ],
+            "threshold": {
+                "line": {"color": "red", "width": 4},
+                "thickness": 0.75,
+                "value": value
+            }
+        }
+    ))
+    fig.update_layout(height=250)
+    return fig
+
+def create_equity_curve(trades):
+    """Create equity curve from trade history"""
+    if not trades:
+        return None
+    
+    cumulative = [0]
+    for trade in trades:
+        cumulative.append(cumulative[-1] + trade["profit"])
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        y=cumulative,
+        mode="lines",
+        name="Equity Curve",
+        line=dict(color="#00ff00", width=2),
+        fill="tozeroy"
+    ))
+    fig.update_layout(
+        title="Equity Curve",
+        xaxis_title="Trade Number",
+        yaxis_title="Cumulative P&L",
+        height=300
+    )
+    return fig
+
+# -------------------------------
+# MAIN APPLICATION
+# -------------------------------
+
+# Sidebar - Data Management
+st.sidebar.markdown("# 📊 Data Management")
+
+file = st.sidebar.file_uploader("Upload JSON Dataset", type=["json"])
+if file and st.session_state.df is None:
+    with st.spinner("Loading and validating data..."):
+        try:
+            st.session_state.df = load_data(file)
+            st.success(f"✅ Loaded {len(st.session_state.df)} rounds!")
+            
+            # Validate data quality
+            missing_cols = set(["rate", "crash", "fetchedAt"]) - set(st.session_state.df.columns)
+            if missing_cols:
+                st.warning(f"Missing columns: {missing_cols}")
+            
+            train_or_retrain_model(st.session_state.df, force=True)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+# Live round input
+st.sidebar.markdown("## 🎮 Live Round Entry")
+new_rate = st.sidebar.number_input("Crash Multiplier", min_value=1.0, step=0.01, key="live_rate")
+
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    if st.button("➕ Add Round", use_container_width=True) and st.session_state.df is not None:
+        now = pd.Timestamp.now()
+        new_row = pd.DataFrame([{
+            "rate": str(new_rate),
+            "crash": new_rate,
+            "prepareTime": now,
+            "beginTime": now,
+            "endTime": now,
+            "hash": hashlib.md5(f"{now}_{new_rate}".encode()).hexdigest(),
+            "salt": "live",
+            "fetchedAt": now
+        }])
+        
+        st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
+        st.session_state.rounds_since_training += 1
+        
+        # Update performance if this was a predicted round
+        if st.session_state.predictions_log and st.session_state.predictions_log[-1]["actual"] is None:
+            last_pred = st.session_state.predictions_log[-1]
+            last_pred["actual"] = new_rate
+            
+            if last_pred["signal"] != "❌ SKIP" and last_pred["target"]:
+                was_bet = True
+                update_performance_metrics(new_rate, last_pred["target"], was_bet)
+                last_pred["was_correct"] = new_rate >= last_pred["target"]
+        
+        st.sidebar.success(f"✅ Added {new_rate}x")
+        
+        if st.session_state.auto_learn and st.session_state.rounds_since_training >= 10:
+            train_or_retrain_model(st.session_state.df, force=True)
+        
+        st.rerun()
+
+with col2:
+    st.session_state.auto_learn = st.checkbox("Auto-learn", st.session_state.auto_learn)
+
+# Batch upload
+with st.sidebar.expander("📦 Batch Upload"):
+    batch_data = st.text_area("Enter multipliers (one per line)", height=150)
+    if st.button("Add Batch") and batch_data and st.session_state.df is not None:
+        multipliers = [float(x.strip()) for x in batch_data.split() if x.strip()]
+        now = pd.Timestamp.now()
+        
+        new_rows = []
+        for i, m in enumerate(multipliers):
+            new_rows.append({
+                "rate": str(m),
+                "crash": m,
+                "prepareTime": now + timedelta(seconds=i*10),
+                "beginTime": now + timedelta(seconds=i*10),
+                "endTime": now + timedelta(seconds=i*10+5),
+                "hash": hashlib.md5(f"{now}_{i}_{m}".encode()).hexdigest(),
+                "salt": "batch",
+                "fetchedAt": now + timedelta(seconds=i*10)
+            })
+        
+        st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(new_rows)], ignore_index=True)
+        st.session_state.rounds_since_training += len(multipliers)
+        st.sidebar.success(f"✅ Added {len(multipliers)} rounds!")
+        st.rerun()
+
+# Main content
+if st.session_state.df is None:
+    st.info("🚀 **Welcome to Crash AI v4!**\n\nUpload your JSON data to start the advanced learning engine.")
+    
+    # Demo mode
+    if st.button("🎮 Try Demo Mode"):
+        demo_data = pd.DataFrame({
+            "rate": [str(x) for x in np.random.exponential(2, 100) + 1],
+            "crash": np.random.exponential(2, 100) + 1,
+            "fetchedAt": pd.date_range(end=datetime.now(), periods=100, freq="5S")
+        })
+        st.session_state.df = demo_data
+        train_or_retrain_model(demo_data, force=True)
+        st.rerun()
+    
+    st.stop()
+
+# Process data
+df = clean_data(st.session_state.df)
+df_ml = df.sort_values("fetchedAt").reset_index(drop=True)
+df_ui = df.sort_values("fetchedAt", ascending=False)
+
+if len(df_ml) < 50:
+    st.warning(f"Need more data! {len(df_ml)}/50 rounds")
+    st.stop()
+
+# Get model
+model = train_or_retrain_model(df_ml)
+if model is None:
+    st.stop()
+
+# Generate predictions
+ctx = get_enhanced_context(df_ml)
+regime_data = detect_enhanced_regime(df_ml)
+
+last_row = df_ml.iloc[[-1]]
+X_live = last_row[FEATURES]
+proba = model.predict_proba(X_live)[0][1]
+
+# Calculate confidence
+confidence = proba * 50
+confidence += ctx["volatility"] * 5
+confidence += regime_data["confidence_boost"]
+confidence = np.clip(confidence, 0, 100)
+
+# Adaptive multipliers
 adaptive = get_adaptive_multipliers(df_ml)
 
-# -------------------------------
-# SIGNAL ENGINE (REGIME AWARE)
-# -------------------------------
-if confidence > 80:
+# Generate signal
+if confidence > 75:
     signal = "🔥 STRONG BET"
     target = adaptive["high"]
-    bet_size = "Large (5-10%)"
-elif confidence > 65:
+    action_color = "linear-gradient(90deg, #ff6b6b, #ff8e53)"
+elif confidence > 60:
     signal = "✅ BET"
-    if regime_data["regime"] == "🟢 HOT":
-        target = adaptive["high"]
-        bet_size = "Medium (3-5%)"
-    else:
-        target = adaptive["mid"]
-        bet_size = "Small-Medium (2-3%)"
+    target = adaptive["mid"]
+    action_color = "#4ecdc4"
 elif confidence > 50:
-    signal = "⚠️ SMALL BET"
-    if regime_data["regime"] == "🔴 CHOPPY":
-        target = adaptive["low"]
-        bet_size = "Tiny (0.5-1%)"
-    else:
-        target = adaptive["mid"]
-        bet_size = "Small (1-2%)"
+    signal = "⚠️ CAUTION"
+    target = adaptive["low"]
+    action_color = "#ffa500"
 else:
-    signal = "❌ SKIP"
+    signal = "❌ AVOID"
     target = None
-    bet_size = "None"
+    action_color = "#95a5a6"
 
-# Log prediction (only if not already logged for this round)
-if len(st.session_state.predictions_log) == 0 or st.session_state.predictions_log[-1]["actual"] is not None:
+# Log prediction
+if not st.session_state.predictions_log or st.session_state.predictions_log[-1]["actual"] is not None:
     st.session_state.predictions_log.append({
         "timestamp": datetime.now(),
         "signal": signal,
         "target": target,
         "confidence": confidence,
         "regime": regime_data["regime"],
-        "actual": None,  # Will be filled when round ends
+        "actual": None,
         "was_correct": None
     })
 
-# Keep only last 100 predictions
-if len(st.session_state.predictions_log) > 100:
-    st.session_state.predictions_log = st.session_state.predictions_log[-100:]
-
-# Calculate recent accuracy
-recent_predictions = [p for p in st.session_state.predictions_log if p["was_correct"] is not None]
-recent_accuracy = sum(p["was_correct"] for p in recent_predictions) / len(recent_predictions) if recent_predictions else 0
+# Calculate position size
+if target:
+    position_size = risk_manager.calculate_position_size(confidence, target, proba)
+else:
+    position_size = 0
 
 # -------------------------------
-# UI - TOP DASHBOARD
+# ADVANCED DASHBOARD
 # -------------------------------
-st.markdown("## 🔥 LIVE AI DECISION")
+st.title("🚀 Crash AI v4 - Advanced Learning Engine")
 
-col1, col2, col3, col4, col5, col6 = st.columns(6)
+# Top metrics row
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
-    st.metric("Signal", signal)
+    st.markdown(f"""
+    <div style="text-align:center; padding:1rem; background:{action_color}; border-radius:10px;">
+        <div style="font-size:0.8rem;">SIGNAL</div>
+        <div class="big-metric">{signal}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
 with col2:
-    st.metric("Confidence", f"{confidence:.1f}%")
+    st.metric("CONFIDENCE", f"{confidence:.1f}%", delta=f"{confidence - 50:.0f}%" if confidence != 50 else None)
+
 with col3:
-    st.metric("ML Prob", f"{proba:.2%}")
+    st.metric("TARGET", f"{target}x" if target else "N/A", 
+              delta=f"{target - adaptive['mid']:.1f}" if target and adaptive['mid'] else None)
+
 with col4:
-    st.metric("🎯 Target", f"{target}x" if target else "No Trade")
+    st.metric("REGIME", regime_data["regime"])
+
 with col5:
-    st.metric("🧠 Regime", regime_data["regime"])
-with col6:
-    st.metric("📊 Recent Accuracy", f"{recent_accuracy:.1%}")
+    st.metric("POSITION", f"{position_size:.1%}", delta="Kelly" if position_size > 0 else None)
 
-# Learning progress bar
-progress_value = min(len(df_ml) / 500, 1.0)
-st.progress(progress_value, text=f"🤖 Learning Progress: {len(df_ml)}/500 rounds for optimal performance")
+# Live betting suggestion
+if target and position_size > 0:
+    st.info(f"""
+    💡 **Trading Decision**
+    - **Action**: {signal}
+    - **Target**: {target}x
+    - **Position Size**: {position_size:.1%} of bankroll (${position_size * 1000:.0f})
+    - **Expected Value**: ${(proba * (target - 1) - (1 - proba)) * position_size * 1000:.2f}
+    """)
 
-# -------------------------------
-# BET SUGGESTION
-# -------------------------------
-if target:
-    st.info(f"💡 **Suggested Action**: {signal} at {target}x | {bet_size} of bankroll")
-    
-    # Kelly Criterion calculation
-    implied_prob = 1 / target if target else 0
-    edge = proba - implied_prob
-    if edge > 0:
-        kelly = edge / (1 - implied_prob)
-        kelly = max(0, min(0.25, kelly))
-        st.caption(f"📐 Kelly Criterion suggests: {kelly:.1%} of bankroll")
+# Enhanced visualizations
+st.markdown("## 📈 Market Analysis")
 
-# -------------------------------
-# LAST 10 MULTIPLIERS
-# -------------------------------
-st.markdown("### 📉 Last 10 Multipliers")
+col1, col2 = st.columns(2)
 
-last_10 = df_ml["crash"].tail(10).to_numpy()[::-1]
-cols = st.columns(10)
+with col1:
+    # Gauge chart for confidence
+    fig_gauge = create_gauge_chart(confidence, "AI Confidence")
+    st.plotly_chart(fig_gauge, use_container_width=True)
 
-for i, val in enumerate(last_10):
+with col2:
+    # Feature importance over time
+    if st.session_state.feature_importance_history:
+        last_importance = st.session_state.feature_importance_history[-1]["importance"]
+        imp_df = pd.DataFrame([last_importance]).T.reset_index()
+        imp_df.columns = ["Feature", "Importance"]
+        imp_df = imp_df.sort_values("Importance", ascending=True).tail(10)
+        
+        fig_imp = px.bar(imp_df, x="Importance", y="Feature", orientation="h",
+                         title="Top 10 Features", color="Importance",
+                         color_continuous_scale="Viridis")
+        fig_imp.update_layout(height=300)
+        st.plotly_chart(fig_imp, use_container_width=True)
+
+# Last 10 rounds visualization
+st.markdown("### 🎲 Recent Rounds")
+last_15 = df_ml["crash"].tail(15).values
+cols = st.columns(15)
+
+for i, (col, val) in enumerate(zip(cols, last_15)):
     color = "#00ff00" if val >= 2 else "#ff4444"
-    with cols[i]:
-        st.markdown(
-            f"""
-            <div style="
-                background-color:{color};
-                padding:10px;
-                border-radius:10px;
-                text-align:center;
-                color:white;
-                font-weight:bold;">
-                {val:.2f}x
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+    col.markdown(f"""
+    <div style="background:{color}; padding:5px; border-radius:5px; text-align:center; color:white;">
+        {val:.1f}x
+    </div>
+    """, unsafe_allow_html=True)
 
-# -------------------------------
-# PREDICTION EXPLANATION
-# -------------------------------
-with st.expander("🧠 Why did the AI make this decision?"):
-    st.markdown(f"**Top Factors Influencing Decision:**")
-    for feature, importance in top_features:
-        st.write(f"- {feature}: {importance:.2%}")
-    
-    st.markdown(f"**Context Analysis:**")
-    st.write(f"- Volatility: {ctx['volatility']:.2f}")
-    st.write(f"- Trend: {ctx['trend']} (10-period avg {ctx['avg_10']:.2f} vs 50-period {ctx['avg_50']:.2f})")
-    st.write(f"- Low Streak: {ctx['low_streak']} rounds under 2x")
-    st.write(f"- High Streak: {ctx['high_streak']} rounds over 3x")
-
-# -------------------------------
-# INSIGHTS
-# -------------------------------
-with st.expander("📊 AI + Regime Insights"):
-    col1, col2 = st.columns(2)
+# Advanced regime analysis
+with st.expander("🎯 Advanced Market Analysis"):
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.write(f"Volatility: {ctx['volatility']:.2f}")
-        st.write(f"Low streak: {ctx['low_streak']}")
-        st.write(f"High streak: {ctx['high_streak']}")
-        st.write(f"Trend: {ctx['trend']}")
+        st.markdown(f"""
+        <div class="insight-box">
+            <strong>📊 Current Regime:</strong><br>
+            {regime_data['regime']}<br>
+            <strong>Avg Multiplier:</strong> {regime_data['avg']:.2f}x<br>
+            <strong>Volatility (Std):</strong> {regime_data['std']:.2f}<br>
+            <strong>Low Ratio:</strong> {regime_data['low_ratio']:.1%}<br>
+            <strong>High Ratio:</strong> {regime_data['high_ratio']:.1%}
+        </div>
+        """, unsafe_allow_html=True)
     
     with col2:
-        st.write(f"Regime avg: {regime_data['avg']:.2f}")
-        st.write(f"Regime std: {regime_data['std']:.2f}")
-        st.write(f"Low ratio: {regime_data['low_ratio']:.2%}")
-        st.write(f"High ratio: {regime_data['high_ratio']:.2%}")
-
-# -------------------------------
-# MULTIPLIER PERFORMANCE TABLE
-# -------------------------------
-if not adaptive["table"].empty:
-    st.subheader("🎯 Adaptive Multiplier Performance")
-    st.dataframe(adaptive["table"], use_container_width=True)
-
-# -------------------------------
-# LEARNING METRICS
-# -------------------------------
-if st.session_state.training_history:
-    st.subheader("📈 Model Learning Progress")
-    history_df = pd.DataFrame(st.session_state.training_history)
+        st.markdown(f"""
+        <div class="insight-box">
+            <strong>📈 Market Statistics:</strong><br>
+            <strong>Skewness:</strong> {regime_data['skewness']:.2f}<br>
+            <strong>Kurtosis:</strong> {regime_data['kurtosis']:.2f}<br>
+            <strong>Regime Shift:</strong> {regime_data['regime_shift']:.2f}<br>
+            <strong>Pattern:</strong> {ctx['pattern']}<br>
+            <strong>Momentum:</strong> {ctx['momentum']:.2%}
+        </div>
+        """, unsafe_allow_html=True)
     
-    if len(history_df) > 0:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.line_chart(history_df.set_index("timestamp")["accuracy"])
-            st.caption("Model Accuracy Over Time")
-        with col2:
-            st.line_chart(history_df.set_index("timestamp")["rounds"])
-            st.caption("Training Data Size")
+    with col3:
+        st.markdown(f"""
+        <div class="insight-box">
+            <strong>🎯 Risk Metrics:</strong><br>
+            <strong>Volatility Cluster:</strong> {ctx['volatility_cluster']:.2f}<br>
+            <strong>10-Period Range:</strong> {ctx['range_10']:.2f}<br>
+            <strong>Low Streak:</strong> {ctx['low_streak']} rounds<br>
+            <strong>High Streak:</strong> {ctx['high_streak']} rounds<br>
+            <strong>Current Balance:</strong> ${st.session_state.performance_metrics['current_balance']:.0f}
+        </div>
+        """, unsafe_allow_html=True)
 
-# -------------------------------
-# DATA VIEW
-# -------------------------------
-st.subheader("📊 Latest Rounds")
-st.dataframe(df_ui.head(20), use_container_width=True)
+# Performance metrics dashboard
+if st.session_state.performance_metrics["total_trades"] > 0:
+    st.markdown("## 💰 Performance Dashboard")
+    
+    metrics = st.session_state.performance_metrics
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        win_rate = metrics["winning_trades"] / metrics["total_trades"] if metrics["total_trades"] > 0 else 0
+        st.metric("Win Rate", f"{win_rate:.1%}")
+    
+    with col2:
+        st.metric("Total P&L", f"${metrics['total_profit']:.2f}", 
+                 delta=f"{metrics['total_profit']:.0f}")
+    
+    with col3:
+        st.metric("Total Trades", metrics["total_trades"])
+    
+    with col4:
+        profit_factor = abs(metrics["total_profit"] / max(1, abs(metrics["total_profit"] - metrics["total_profit"])))
+        st.metric("Profit Factor", f"{profit_factor:.2f}")
+    
+    with col5:
+        st.metric("Max DD", f"{metrics['max_drawdown']:.1%}")
+    
+    # Equity curve
+    if metrics["trade_history"]:
+        fig_equity = create_equity_curve(metrics["trade_history"])
+        if fig_equity:
+            st.plotly_chart(fig_equity, use_container_width=True)
 
-st.subheader("📈 Crash History")
-st.line_chart(df_ml["crash"])
+# Backtest results
+if st.button("🔄 Run Advanced Backtest"):
+    with st.spinner("Running comprehensive backtest..."):
+        st.session_state.backtest_results = run_advanced_backtest(df_ml)
+    
+if st.session_state.backtest_results is not None:
+    st.markdown("## 📊 Backtest Results")
+    st.dataframe(
+        st.session_state.backtest_results.style.format({
+            'final_balance': '${:.2f}',
+            'total_return': '${:.2f}',
+            'return_pct': '{:.1f}%',
+            'win_rate': '{:.1%}',
+            'sharpe_ratio': '{:.2f}',
+            'max_drawdown': '${:.2f}'
+        }),
+        use_container_width=True
+    )
 
-# -------------------------------
-# EXPORT FUNCTIONALITY
-# -------------------------------
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("💾 Export Trained Model"):
-        try:
-            import joblib
-            joblib.dump(st.session_state.model, "crash_ai_model.pkl")
-            st.success("Model saved as crash_ai_model.pkl")
-        except Exception as e:
-            st.error(f"Error saving model: {str(e)}")
+# Data tables
+with st.expander("📋 Data Explorer"):
+    tab1, tab2 = st.tabs(["Recent Rounds", "Model Performance"])
+    
+    with tab1:
+        st.dataframe(df_ui.head(50), use_container_width=True)
+        
+        # Download button
+        csv = df_ui.head(1000).to_csv(index=False)
+        st.download_button("📥 Download Data", csv, "crash_data.csv", "text/csv")
+    
+    with tab2:
+        if st.session_state.training_history:
+            training_df = pd.DataFrame(st.session_state.training_history)
+            st.line_chart(training_df.set_index("timestamp")["accuracy"])
+            st.dataframe(training_df.tail(10))
 
-with col2:
-    if st.button("📥 Export Prediction Log"):
-        if st.session_state.predictions_log:
-            log_df = pd.DataFrame(st.session_state.predictions_log)
-            csv = log_df.to_csv(index=False)
-            st.download_button("Download Log", csv, "prediction_log.csv")
-        else:
-            st.warning("No predictions to export")
-
-# Auto-refresh option for live monitoring
-auto_refresh = st.sidebar.checkbox("🔄 Auto-refresh dashboard (5 sec)", value=False)
+# Auto-refresh
+auto_refresh = st.sidebar.checkbox("🔄 Live Mode (5s refresh)", False)
 if auto_refresh:
     time.sleep(5)
     st.rerun()
+
+# Footer
+st.markdown
