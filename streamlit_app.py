@@ -5,9 +5,16 @@ import time
 import hashlib
 from datetime import datetime, timedelta
 from collections import deque
-from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
+
+# Try to import scipy, fallback if not available
+try:
+    from scipy import stats
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    st.warning("SciPy not available. Some advanced statistics will be disabled.")
 
 from data.loader import load_data
 from data.cleaner import clean_data, FEATURES
@@ -125,10 +132,13 @@ class MarketMicrostructure:
             return 0.5
         
         returns = np.log(df['crash'].tail(window) / df['crash'].tail(window).shift(1)).dropna()
+        if len(returns) < 5:
+            return 0.5
+            
         volatility_cluster = returns.rolling(5).std().mean()
         
         # Normalize to 0-1 range (higher = deeper market)
-        depth = 1 / (1 + volatility_cluster * 10)
+        depth = 1 / (1 + volatility_cluster * 10) if not np.isnan(volatility_cluster) else 0.5
         return max(0, min(1, depth))
     
     @staticmethod
@@ -209,6 +219,9 @@ class EnsemblePredictor:
             return 0.5
         
         deltas = np.diff(prices)
+        if len(deltas) < period:
+            return 0.5
+            
         seed = deltas[:period]
         up = seed[seed >= 0].sum() / period
         down = -seed[seed < 0].sum() / period
@@ -273,25 +286,31 @@ class EnsemblePredictor:
         recent = df.tail(30)['crash'].values
         pattern_score = 0.5
         
-        # Trend strength
-        z_score = stats.zscore(recent)
-        trend_strength = abs(np.mean(z_score[-5:]))
-        if trend_strength > 1.5:
-            pattern_score += 0.1
+        # Trend strength using z-score if scipy available
+        if SCIPY_AVAILABLE and len(recent) >= 5:
+            try:
+                z_score = stats.zscore(recent)
+                trend_strength = abs(np.mean(z_score[-5:])) if len(z_score) >= 5 else 0
+                if trend_strength > 1.5:
+                    pattern_score += 0.1
+            except:
+                pass
         
         # Mean reversion potential
-        current_deviation = (recent[-1] - np.mean(recent)) / np.std(recent)
-        if abs(current_deviation) > 1:
-            pattern_score += 0.15 if current_deviation < 0 else -0.1
+        if len(recent) >= 5:
+            current_deviation = (recent[-1] - np.mean(recent)) / (np.std(recent) + 0.001)
+            if abs(current_deviation) > 1:
+                pattern_score += 0.15 if current_deviation < 0 else -0.1
         
         # Volatility contraction/expansion
-        recent_vol = np.std(recent[-10:])
-        historical_vol = np.std(recent)
-        
-        if recent_vol < historical_vol * 0.7:
-            pattern_score += 0.1  # Volatility contraction - potential breakout
-        elif recent_vol > historical_vol * 1.5:
-            pattern_score -= 0.05  # High volatility - caution
+        if len(recent) >= 10:
+            recent_vol = np.std(recent[-10:])
+            historical_vol = np.std(recent)
+            
+            if recent_vol < historical_vol * 0.7:
+                pattern_score += 0.1  # Volatility contraction - potential breakout
+            elif recent_vol > historical_vol * 1.5:
+                pattern_score -= 0.05  # High volatility - caution
         
         return max(0, min(1, pattern_score))
 
@@ -305,7 +324,7 @@ class DynamicConfidenceAdjuster:
         self.performance_history = deque(maxlen=50)
         self.regime_performance = {}
     
-    def adjust_confidence(self, base_confidence, market_regime, recent_accuracy, streak):
+    def adjust_confidence(self, base_confidence, market_regime, recent_accuracy, streak, df=None):
         """Dynamically adjust confidence based on multiple factors"""
         adjusted = base_confidence
         
@@ -337,9 +356,10 @@ class DynamicConfidenceAdjuster:
             adjusted += 0.1 * base_confidence  # Increase after losses (mean reversion)
         
         # Adaptive scaling based on market depth
-        microstructure = MarketMicrostructure()
-        market_depth = microstructure.calculate_market_depth(df)
-        adjusted *= (0.8 + market_depth * 0.4)
+        if df is not None:
+            microstructure = MarketMicrostructure()
+            market_depth = microstructure.calculate_market_depth(df)
+            adjusted *= (0.8 + market_depth * 0.4)
         
         return max(0, min(100, adjusted))
 
@@ -507,7 +527,7 @@ def get_context(df):
     # Calculate additional metrics
     returns = np.log(df['crash'] / df['crash'].shift(1)).dropna()
     
-    return {
+    context = {
         "volatility": last_20.std(),
         "low_streak": sum(last_10 < 2),
         "high_streak": sum(last_10 > 3),
@@ -520,13 +540,45 @@ def get_context(df):
         "min_50": last_50.min(),
         "skew": all_time.skew() if len(all_time) > 2 else 0,
         "kurtosis": all_time.kurtosis() if len(all_time) > 3 else 0,
-        "sharpe_ratio": returns.mean() / returns.std() if len(returns) > 0 and returns.std() > 0 else 0,
-        "var_95": np.percentile(returns, 5) if len(returns) > 0 else 0
     }
+    
+    # Add returns-based metrics if available
+    if len(returns) > 0:
+        context["sharpe_ratio"] = returns.mean() / (returns.std() + 0.001)
+        context["var_95"] = np.percentile(returns, 5) if len(returns) > 0 else 0
+    else:
+        context["sharpe_ratio"] = 0
+        context["var_95"] = 0
+    
+    return context
 
 # -------------------------------
 # ENHANCED REGIME DETECTION
 # -------------------------------
+def calculate_hurst_exponent(price_series):
+    """Calculate Hurst exponent for trend detection"""
+    if len(price_series) < 20:
+        return 0.5
+    
+    lags = range(2, min(20, len(price_series) // 2))
+    tau = []
+    
+    for lag in lags:
+        diff = np.log(price_series[lag:]) - np.log(price_series[:-lag])
+        var = np.var(diff)
+        if not np.isnan(var) and var > 0:
+            tau.append(var)
+    
+    if len(tau) < 2:
+        return 0.5
+        
+    try:
+        m = np.polyfit(np.log(lags[:len(tau)]), np.log(tau), 1)
+        hurst = m[0] / 2
+        return max(0, min(1, hurst))
+    except:
+        return 0.5
+
 def detect_regime(df):
     """Enhanced regime detection with more sophisticated logic"""
     last_20 = df.tail(20)["crash"]
@@ -619,33 +671,13 @@ def detect_regime(df):
         "hurst_exponent": hurst_exponent
     }
 
-def calculate_hurst_exponent(price_series):
-    """Calculate Hurst exponent for trend detection"""
-    if len(price_series) < 20:
-        return 0.5
-    
-    lags = range(2, min(20, len(price_series) // 2))
-    tau = []
-    
-    for lag in lags:
-        diff = np.log(price_series[lag:]) - np.log(price_series[:-lag])
-        var = np.var(diff)
-        tau.append(var)
-    
-    try:
-        m = np.polyfit(np.log(lags), np.log(tau), 1)
-        hurst = m[0] / 2
-        return max(0, min(1, hurst))
-    except:
-        return 0.5
-
 # -------------------------------
 # ADVANCED MULTIPLIER OPTIMIZATION
 # -------------------------------
 def evaluate_multiplier_advanced(df, target, window=100, min_samples=30):
     """Advanced evaluation with risk-adjusted returns and market regime"""
     if len(df) < min_samples:
-        return 0, 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0, 0, 0, 0
     
     balance = 0
     stake = 1
@@ -681,12 +713,23 @@ def evaluate_multiplier_advanced(df, target, window=100, min_samples=30):
         drawdown = (peak - balance) / peak if peak > 0 else 0
         max_drawdown = max(max_drawdown, drawdown)
     
-    win_rate = wins / total_trades if total_trades > 0 else 0
-    sharpe = np.mean(returns) / np.std(returns) if len(returns) > 1 and np.std(returns) > 0 else 0
-    sortino = np.mean(returns) / np.std([r for r in returns if r < 0]) if len(returns) > 0 else 0
+    if total_trades == 0:
+        return 0, 0, 0, 0, 0, 0, 0, 0
+        
+    win_rate = wins / total_trades
+    returns_array = np.array(returns)
+    
+    sharpe = returns_array.mean() / (returns_array.std() + 0.001)
+    
+    # Sortino ratio (downside deviation)
+    negative_returns = returns_array[returns_array < 0]
+    sortino = returns_array.mean() / (negative_returns.std() + 0.001) if len(negative_returns) > 0 else 0
     
     # Advanced metrics
-    profit_factor = abs(sum(r for r in returns if r > 0) / sum(r for r in returns if r < 0)) if sum(r for r in returns if r < 0) != 0 else 0
+    positive_sum = sum(r for r in returns if r > 0)
+    negative_sum = abs(sum(r for r in returns if r < 0))
+    profit_factor = positive_sum / negative_sum if negative_sum > 0 else 0
+    
     risk_score = (win_rate * sharpe * sortino) / (max_drawdown + 0.01) if max_drawdown > 0 else win_rate * sharpe * sortino * 100
     
     return balance, win_rate, sharpe, sortino, risk_score, max_drawdown, profit_factor, max_consecutive_losses
@@ -702,7 +745,7 @@ def get_adaptive_multipliers_advanced(df):
         
         if profit > 0 or win_rate > 0:
             # Comprehensive scoring
-            score = (profit * win_rate * (1 + sharpe) * (1 + sortino) * 
+            score = (profit * win_rate * (1 + abs(sharpe)) * (1 + abs(sortino)) * 
                     (1 - drawdown) * profit_factor / (1 + max_losses/10))
             
             results.append({
@@ -715,7 +758,7 @@ def get_adaptive_multipliers_advanced(df):
                 "drawdown": drawdown,
                 "profit_factor": profit_factor,
                 "max_losses": max_losses,
-                "score": score
+                "score": score if not np.isnan(score) else 0
             })
     
     if not results:
@@ -728,6 +771,7 @@ def get_adaptive_multipliers_advanced(df):
         }
     
     res = pd.DataFrame(results)
+    res = res[res['score'].notna()].sort_values("score", ascending=False)
     
     # Risk-based categorization
     ultra_conservative = res[res["m"] <= 1.5]
@@ -736,11 +780,11 @@ def get_adaptive_multipliers_advanced(df):
     high_risk = res[res["m"] > 2.5]
     
     return {
-        "ultra_conservative": ultra_conservative.sort_values("risk_score", ascending=False).iloc[0]["m"] if len(ultra_conservative) > 0 else 1.3,
-        "low": low_risk.sort_values("risk_score", ascending=False).iloc[0]["m"] if len(low_risk) > 0 else 1.5,
-        "mid": medium_risk.sort_values("risk_score", ascending=False).iloc[0]["m"] if len(medium_risk) > 0 else 2.0,
-        "high": high_risk.sort_values("risk_score", ascending=False).iloc[0]["m"] if len(high_risk) > 0 else 3.0,
-        "table": res.sort_values("score", ascending=False)
+        "ultra_conservative": ultra_conservative.iloc[0]["m"] if len(ultra_conservative) > 0 else 1.3,
+        "low": low_risk.iloc[0]["m"] if len(low_risk) > 0 else 1.5,
+        "mid": medium_risk.iloc[0]["m"] if len(medium_risk) > 0 else 2.0,
+        "high": high_risk.iloc[0]["m"] if len(high_risk) > 0 else 3.0,
+        "table": res
     }
 
 # -------------------------------
@@ -915,4 +959,476 @@ if st.session_state.df is not None and st.session_state.model is not None:
     
     col_retrain, col_reset = st.sidebar.columns(2)
     with col_retrain:
-        if st.button("🔄
+        if st.button("🔄 Force Retrain", use_container_width=True):
+            train_or_retrain_model(st.session_state.df, force=True)
+            st.sidebar.success("Model retrained!")
+            st.rerun()
+    with col_reset:
+        if st.button("🗑️ Reset Session", use_container_width=True):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            init_session_state()
+            st.rerun()
+    
+    # Training history
+    if st.session_state.training_history:
+        with st.sidebar.expander("📊 Training History"):
+            history_df = pd.DataFrame(st.session_state.training_history)
+            st.line_chart(history_df.set_index("timestamp")["accuracy"])
+            if 'cv_mean' in history_df.columns:
+                st.caption(f"Latest CV Accuracy: {history_df.iloc[-1]['cv_mean']:.2%} ±{history_df.iloc[-1]['cv_std']:.2%}")
+
+# -------------------------------
+# MAIN APPLICATION
+# -------------------------------
+if st.session_state.df is None:
+    st.info("📤 Upload your JSON file to begin. The AI will learn from every round you add!")
+    st.stop()
+
+# -------------------------------
+# CLEAN DATA
+# -------------------------------
+try:
+    df = clean_data(st.session_state.df)
+    df_ml = df.sort_values("fetchedAt").reset_index(drop=True)
+    df_ui = df.sort_values("fetchedAt", ascending=False)
+except Exception as e:
+    st.error(f"Error cleaning data: {str(e)}")
+    st.stop()
+
+if len(df_ml) < 50:
+    st.warning(f"Need at least 50 rounds for AI training. Currently: {len(df_ml)}")
+    st.info("📝 Add more rounds using the sidebar to help the AI learn!")
+    st.stop()
+
+# -------------------------------
+# TRAIN/GET MODEL
+# -------------------------------
+model = train_or_retrain_model(df_ml)
+
+if model is None:
+    st.error("Model training failed. Please add more data.")
+    st.stop()
+
+# -------------------------------
+# GET CONTEXT AND REGIME
+# -------------------------------
+ctx = get_context(df_ml)
+regime_data = detect_regime(df_ml)
+
+# -------------------------------
+# ENSEMBLE PREDICTION
+# -------------------------------
+# ML prediction
+last_row = df_ml.iloc[[-1]]
+X_live = last_row[FEATURES]
+
+try:
+    ml_proba = model.predict_proba(X_live)[0][1]
+except Exception as e:
+    st.warning(f"ML Prediction error: {str(e)}")
+    ml_proba = 0.5
+
+# Technical prediction
+tech_proba = EnsemblePredictor.technical_prediction(df_ml)
+
+# Pattern recognition
+pattern_proba = EnsemblePredictor.pattern_recognition(df_ml)
+
+# Ensemble weighted average
+ensemble_proba = (ml_proba * 0.5 + tech_proba * 0.3 + pattern_proba * 0.2)
+proba = ensemble_proba
+
+# Get feature importance
+try:
+    feature_importance = dict(zip(FEATURES, model.model.feature_importances_))
+    top_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:5]
+except:
+    top_features = [("feature1", 0), ("feature2", 0)]
+
+# -------------------------------
+# ENHANCED CONFIDENCE ENGINE
+# -------------------------------
+base_confidence = proba * 50
+
+# Volatility adjustment
+if ctx["volatility"] > 3.0:
+    base_confidence += 30
+elif ctx["volatility"] > 2.0:
+    base_confidence += 20
+elif ctx["volatility"] > 1.5:
+    base_confidence += 10
+
+# Streak adjustments
+if ctx["current_streak"] >= 8:
+    base_confidence += 25
+elif ctx["current_streak"] >= 5:
+    base_confidence += 15
+elif ctx["current_streak"] >= 3:
+    base_confidence += 5
+
+if ctx["low_streak"] >= 6:
+    base_confidence += 20
+elif ctx["low_streak"] >= 4:
+    base_confidence += 10
+
+if ctx["high_streak"] >= 5:
+    base_confidence -= 20
+elif ctx["high_streak"] >= 3:
+    base_confidence -= 10
+
+# Regime adjustment
+base_confidence += regime_data["confidence_boost"]
+
+# Dynamic confidence adjustment
+confidence_adjuster = DynamicConfidenceAdjuster()
+recent_accuracy = None
+if st.session_state.performance_metrics:
+    recent_accuracy = st.session_state.performance_metrics[-1]["rolling_accuracy"]
+
+confidence = confidence_adjuster.adjust_confidence(
+    base_confidence, 
+    regime_data["regime"], 
+    recent_accuracy, 
+    ctx["current_streak"],
+    df_ml
+)
+
+# Learning progress boost (diminishing returns)
+learning_progress = min(len(df_ml) / 1000, 0.3)
+confidence *= (1 + learning_progress)
+
+# Apply confidence adaptation from historical performance
+confidence *= st.session_state.confidence_adaptation
+
+# Ensure bounds
+confidence = max(0, min(100, confidence))
+
+# -------------------------------
+# ADAPTIVE MULTIPLIERS
+# -------------------------------
+adaptive = get_adaptive_multipliers_advanced(df_ml)
+
+# -------------------------------
+# SIGNAL ENGINE (REGIME AWARE)
+# -------------------------------
+if confidence > 80:
+    signal = "🔥 STRONG BET"
+    target = adaptive["high"]
+    bet_size = "Large (5-10%)"
+    signal_color = "strong"
+elif confidence > 65:
+    signal = "✅ BET"
+    if regime_data["regime"] in ["🟢 HOT", "🟢 WARM"]:
+        target = adaptive["high"]
+        bet_size = "Medium-Large (4-7%)"
+    else:
+        target = adaptive["mid"]
+        bet_size = "Medium (2-4%)"
+elif confidence > 50:
+    signal = "⚠️ SMALL BET"
+    if regime_data["regime"] in ["🔴 CHOPPY", "🔴 EXTREME CHOPPY"]:
+        target = adaptive["ultra_conservative"]
+        bet_size = "Tiny (0.5-1%)"
+    else:
+        target = adaptive["mid"]
+        bet_size = "Small (1-2%)"
+else:
+    signal = "❌ SKIP"
+    target = None
+    bet_size = "None"
+    signal_color = "skip"
+
+# Log prediction
+ensemble_scores = {
+    "ml": ml_proba,
+    "technical": tech_proba,
+    "pattern": pattern_proba
+}
+log_prediction(signal, target, confidence, regime_data["regime"], ensemble_scores=ensemble_scores)
+
+# Calculate recent accuracy
+recent_predictions = [p for p in st.session_state.predictions_log if p["was_correct"] is not None]
+recent_accuracy = sum(p["was_correct"] for p in recent_predictions) / len(recent_predictions) if recent_predictions else 0
+
+# -------------------------------
+# UI - MAIN DASHBOARD
+# -------------------------------
+st.markdown("## 🔥 LIVE AI DECISION")
+
+# Dynamic card styling
+confidence_class = "confidence-high" if confidence > 70 else "confidence-medium" if confidence > 50 else "confidence-low"
+
+col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+with col1:
+    st.metric("Signal", signal)
+with col2:
+    st.metric("Confidence", f"{confidence:.1f}%")
+with col3:
+    st.metric("ML Probability", f"{proba:.2%}")
+with col4:
+    st.metric("🎯 Target", f"{target}x" if target else "No Trade")
+with col5:
+    st.metric("🧠 Regime", regime_data["regime"][:15])
+with col6:
+    st.metric("📊 Recent Accuracy", f"{recent_accuracy:.1%}")
+
+# Ensemble breakdown
+with st.expander("🎯 Ensemble Model Breakdown"):
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.metric("ML Model", f"{ml_proba:.2%}")
+    with col_b:
+        st.metric("Technical Analysis", f"{tech_proba:.2%}")
+    with col_c:
+        st.metric("Pattern Recognition", f"{pattern_proba:.2%}")
+
+# Risk level indicator
+risk_levels = {"Very Low": "🟢", "Low": "🟡", "Medium": "🟠", "High": "🔴", "Very High": "⚫"}
+st.markdown(f"**Risk Level:** {risk_levels.get(regime_data['risk_level'], '🟡')} {regime_data['risk_level']}")
+
+# Strategy recommendation
+st.info(f"📋 **Regime Strategy:** {regime_data['strategy']}")
+
+# Learning progress
+progress_value = min(len(df_ml) / 1000, 1.0)
+st.progress(progress_value, text=f"🤖 Learning Progress: {len(df_ml)}/1000 rounds for optimal performance")
+
+# -------------------------------
+# BET SUGGESTION WITH KELLY
+# -------------------------------
+if target:
+    # Calculate streak adjustment
+    streak_adj = max(0.5, min(1.5, 1 - (ctx["current_streak"] - 3) * 0.1))
+    kelly = calculate_kelly_advanced(proba, target, confidence, streak_adj)
+    
+    st.success(f"💡 **Suggested Action**: {signal} at **{target}x** | {bet_size} of bankroll")
+    
+    if kelly > 0:
+        st.caption(f"📐 Kelly Criterion suggests: **{kelly:.1%}** of bankroll (max {calculate_kelly_advanced(proba, target, confidence, 0.5):.1%} conservative)")
+        
+        # Risk warning
+        if regime_data["risk_level"] in ["High", "Very High"]:
+            st.warning(f"⚠️ High risk regime detected. Consider reducing position size to {kelly * 0.5:.1%}")
+else:
+    st.info("💡 **Suggested Action**: Skip this round - wait for better conditions")
+
+# -------------------------------
+# LAST 10 MULTIPLIERS VISUALIZATION
+# -------------------------------
+st.markdown("### 📉 Last 10 Multipliers")
+
+last_10 = df_ml["crash"].tail(10).to_numpy()[::-1]
+cols = st.columns(10)
+
+for i, val in enumerate(last_10):
+    if val >= 3:
+        color = "#00ff00"
+    elif val >= 2:
+        color = "#ffff00"
+    else:
+        color = "#ff4444"
+    
+    with cols[i]:
+        st.markdown(
+            f"""
+            <div style="
+                background-color:{color};
+                padding:10px;
+                border-radius:10px;
+                text-align:center;
+                color:white;
+                font-weight:bold;
+                margin:2px;">
+                {val:.2f}x
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+# -------------------------------
+# PREDICTION EXPLANATION
+# -------------------------------
+with st.expander("🧠 Why did the AI make this decision?"):
+    st.markdown("**Ensemble Model Contributions:**")
+    st.write(f"- Machine Learning: {ml_proba:.2%} (50% weight)")
+    st.write(f"- Technical Analysis: {tech_proba:.2%} (30% weight)")
+    st.write(f"- Pattern Recognition: {pattern_proba:.2%} (20% weight)")
+    
+    st.markdown("**Top Features Influencing ML Model:**")
+    for feature, importance in top_features:
+        st.write(f"- {feature}: {importance:.2%}")
+    
+    st.markdown("**Context Analysis:**")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.write(f"- Volatility: {ctx['volatility']:.2f}")
+        st.write(f"- Trend: {ctx['trend']}")
+        st.write(f"- Current Streak: {ctx['current_streak']} rounds")
+        st.write(f"- 10-period avg: {ctx['avg_10']:.2f}")
+    with col_b:
+        st.write(f"- 20-period avg: {ctx['avg_20']:.2f}")
+        st.write(f"- 50-period avg: {ctx['avg_50']:.2f}")
+        st.write(f"- Low Streak: {ctx['low_streak']} rounds under 2x")
+        st.write(f"- High Streak: {ctx['high_streak']} rounds over 3x")
+    
+    st.markdown("**Regime Analysis:**")
+    st.write(f"- Regime: {regime_data['regime']}")
+    st.write(f"- Momentum: {regime_data['momentum']:.2%}")
+    st.write(f"- Hurst Exponent: {regime_data['hurst_exponent']:.2f} ({'Trending' if regime_data['hurst_exponent'] > 0.6 else 'Mean-Reverting' if regime_data['hurst_exponent'] < 0.4 else 'Random'})")
+    st.write(f"- Low Ratio: {regime_data['low_ratio']:.1%}")
+    st.write(f"- High Ratio: {regime_data['high_ratio']:.1%}")
+    st.write(f"- Extreme Ratio (>5x): {regime_data['extreme_ratio']:.1%}")
+    
+    st.markdown("**Confidence Adjustments:**")
+    st.write(f"- Base Confidence: {base_confidence:.1f}%")
+    st.write(f"- Regime Boost: {regime_data['confidence_boost']:.1f}%")
+    st.write(f"- Performance Factor: {recent_accuracy if recent_accuracy else 0:.1%}")
+    st.write(f"- Market Depth: {MarketMicrostructure.calculate_market_depth(df_ml):.2f}")
+    st.write(f"- Adaptation Factor: {st.session_state.confidence_adaptation:.2f}")
+
+# -------------------------------
+# INSIGHTS DASHBOARD
+# -------------------------------
+with st.expander("📊 Advanced Analytics"):
+    tab1, tab2, tab3, tab4 = st.tabs(["Performance Metrics", "Risk Analysis", "Market Statistics", "Micro Patterns"])
+    
+    with tab1:
+        if st.session_state.performance_metrics:
+            perf_df = pd.DataFrame(st.session_state.performance_metrics)
+            st.line_chart(perf_df.set_index("timestamp")["rolling_accuracy"])
+            st.metric("Total Predictions", st.session_state.total_predictions)
+            st.metric("Correct Predictions", st.session_state.correct_predictions)
+            if st.session_state.total_predictions > 0:
+                st.metric("Overall Accuracy", f"{st.session_state.correct_predictions/st.session_state.total_predictions:.1%}")
+        
+        # Ensemble performance
+        st.subheader("Ensemble Model Performance")
+        ensemble_df = pd.DataFrame(st.session_state.predictions_log[-50:])
+        if len(ensemble_df) > 0:
+            st.write("Recent ensemble contributions tracked")
+    
+    with tab2:
+        if not adaptive["table"].empty:
+            st.subheader("Multiplier Risk-Reward Analysis")
+            display_cols = ["m", "win_rate", "sharpe", "sortino", "drawdown", "profit_factor"]
+            st.dataframe(adaptive["table"][display_cols].head(10), use_container_width=True)
+        
+        st.subheader("Kelly vs Confidence")
+        if target:
+            st.metric("Recommended Kelly", f"{kelly:.1%}")
+            st.metric("Current Confidence", f"{confidence:.1f}%")
+            st.metric("Streak Adjustment", f"{streak_adj:.2f}")
+            st.caption("Kelly based on ensemble probability vs implied odds")
+    
+    with tab3:
+        st.subheader("Market Statistics")
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            st.metric("Mean Multiplier", f"{df_ml['crash'].mean():.2f}x")
+            st.metric("Median", f"{df_ml['crash'].median():.2f}x")
+        with col_s2:
+            st.metric("Std Dev", f"{df_ml['crash'].std():.2f}")
+            st.metric("Skewness", f"{df_ml['crash'].skew():.2f}")
+        with col_s3:
+            st.metric("Max", f"{df_ml['crash'].max():.2f}x")
+            st.metric("Min", f"{df_ml['crash'].min():.2f}x")
+        
+        st.subheader("Advanced Metrics")
+        st.metric("Hurst Exponent", f"{regime_data['hurst_exponent']:.3f}")
+        st.metric("Sharpe Ratio (10-period)", f"{ctx.get('sharpe_ratio', 0):.2f}")
+        st.metric("VaR 95%", f"{ctx.get('var_95', 0):.2%}")
+    
+    with tab4:
+        st.subheader("Micro Pattern Detection")
+        patterns = MarketMicrostructure.detect_micro_patterns(df_ml)
+        for pattern, detected in patterns.items():
+            status = "✅ Detected" if detected else "❌ Not Detected"
+            st.write(f"- {pattern.replace('_', ' ').title()}: {status}")
+        
+        st.subheader("Order Flow Analysis")
+        order_flow = MarketMicrostructure.calculate_order_flow_imbalance(df_ml)
+        st.metric("Order Flow Imbalance", f"{order_flow:.2f}")
+        if order_flow > 0.3:
+            st.info("🟢 Positive order flow - buying pressure detected")
+        elif order_flow < -0.3:
+            st.warning("🔴 Negative order flow - selling pressure detected")
+
+# -------------------------------
+# MULTIPLIER PERFORMANCE TABLE
+# -------------------------------
+if not adaptive["table"].empty:
+    st.subheader("🎯 Multiplier Performance Ranking")
+    display_cols = ["m", "win_rate", "sharpe", "sortino", "profit", "drawdown", "profit_factor"]
+    st.dataframe(adaptive["table"][display_cols].head(10), use_container_width=True)
+
+# -------------------------------
+# MODEL LEARNING CURVE
+# -------------------------------
+if st.session_state.training_history:
+    st.subheader("📈 Model Learning Progress")
+    history_df = pd.DataFrame(st.session_state.training_history)
+    
+    if len(history_df) > 0:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.line_chart(history_df.set_index("timestamp")["accuracy"])
+            st.caption("Test Accuracy Over Time")
+        with col2:
+            if "cv_mean" in history_df.columns:
+                st.line_chart(history_df.set_index("timestamp")["cv_mean"])
+                st.caption("Cross-Validation Accuracy (5-fold)")
+
+# -------------------------------
+# DATA VIEW
+# -------------------------------
+st.subheader("📊 Latest Rounds")
+st.dataframe(df_ui.head(20), use_container_width=True)
+
+# Crash history chart
+st.subheader("📈 Crash History")
+chart_data = df_ml[["crash"]].tail(200)
+st.line_chart(chart_data)
+
+# -------------------------------
+# EXPORT FUNCTIONALITY
+# -------------------------------
+st.subheader("💾 Export Options")
+col_exp1, col_exp2 = st.columns(2)
+
+with col_exp1:
+    if st.button("📥 Export Data", use_container_width=True):
+        csv = st.session_state.df.to_csv(index=False)
+        st.download_button(
+            "Download CSV",
+            csv,
+            f"crash_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            key="data_download"
+        )
+
+with col_exp2:
+    if st.button("📊 Export Predictions", use_container_width=True):
+        if st.session_state.predictions_log:
+            log_df = pd.DataFrame(st.session_state.predictions_log)
+            csv = log_df.to_csv(index=False)
+            st.download_button(
+                "Download Prediction Log",
+                csv,
+                f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                key="pred_download"
+            )
+        else:
+            st.warning("No predictions to export")
+
+# -------------------------------
+# AUTO-REFRESH OPTION
+# -------------------------------
+auto_refresh = st.sidebar.checkbox("🔄 Auto-refresh dashboard (5 sec)", value=False)
+if auto_refresh:
+    time.sleep(5)
+    st.rerun()
+
+# Footer
+st.markdown("---")
+st.caption("🚀 Crash AI v5 - Advanced Ensemble Decision Engine | Risk Warning: Never bet more than you can afford to lose")
